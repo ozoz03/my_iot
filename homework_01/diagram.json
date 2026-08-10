@@ -22,7 +22,7 @@
           "id": "led1",
           "top": 140,
           "left": 208,
-          "attrs": { "color": "red" }
+          "attrs": { "color": "green" }
         }
       ],
       "connections": [
