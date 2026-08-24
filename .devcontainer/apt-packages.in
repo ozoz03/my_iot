@@ -7,6 +7,15 @@ tzdata
 ssh
 git
 
+# Python 3 з pip/venv: потрібен PlatformIO IDE extension, яка сама
+# створює venv і встановлює platformio через pip при першому запуску.
+# Ubuntu noble не тягне ensurepip/venv в комплекті з python3 за
+# замовчуванням - без цих пакетів PlatformIO падає з
+# "Can not find working Python 3.6+ Interpreter".
+python3-pip
+python3-venv
+python-is-python3
+
 # C++ toolchain і language server для редактора.
 gcc
 clang
