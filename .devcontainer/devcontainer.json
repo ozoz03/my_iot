@@ -23,9 +23,12 @@
 
   // SSH ключі потрібні для git operations. bash_history винесено на host,
   // щоб історія команд переживала rebuild контейнера.
+  // UA_IOT-DEVELOPER підключено read-only з host projects, щоб мати доступ
+  // до матеріалів лекцій з контейнера.
   "mounts": [
     "source=${localEnv:HOME}/.ssh,target=/home/${localEnv:USER}/.ssh,type=bind,readonly,consistency=cached",
-    "source=${localEnv:HOME}/.devcontainers/${localWorkspaceFolderBasename}/.bash_history,target=/home/${localEnv:USER}/.bash_history,type=bind,consistency=delegated"
+    "source=${localEnv:HOME}/.devcontainers/${localWorkspaceFolderBasename}/.bash_history,target=/home/${localEnv:USER}/.bash_history,type=bind,consistency=delegated",
+    "source=${localEnv:HOME}/projects/iot/UA_IOT-DEVELOPER,target=/home/${localEnv:USER}/UA_IOT-DEVELOPER,type=bind,readonly,consistency=cached"
   ],
 
   // initialize створює host-side директорії для mounts до старту container-а.
