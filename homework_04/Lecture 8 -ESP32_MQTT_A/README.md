@@ -1,0 +1,185 @@
+# Лекція 8 — MQTT Publisher (ESP32-A)
+
+Демонстрація підключення ESP32 до публічного MQTT брокера та публікації сенсорних даних у топік. Неблокуючий таймер на `millis()` публікує пакет кожні 10 секунд. Автоматичний reconnect через `millis()` відновлює з'єднання без `delay()` (Arduino Framework, PlatformIO + Wokwi).
+
+---
+
+## Структура проєкту
+
+```
+src/
+└── main.cpp      — основний файл прошивки
+diagram.json      — схема підключення для Wokwi-симулятора
+wokwi.toml        — конфігурація Wokwi
+platformio.ini    — конфігурація PlatformIO (платформа, плата, швидкість монітора)
+```
+
+---
+
+## Залежності
+
+```ini
+lib_deps =
+    knolleary/PubSubClient
+```
+
+`WiFi.h` входить до складу ESP32 Arduino core — додаткових бібліотек не потрібно.
+
+---
+
+## Конфігурація
+
+```cpp
+#define WIFI_SSID      "Wokwi-GUEST"             // SSID мережі (Wokwi симулятор)
+#define WIFI_PASSWORD  ""                         // пароль (порожній для Wokwi-GUEST)
+#define WIFI_TIMEOUT   10000                      // таймаут підключення, мс
+
+#define MQTT_BROKER    "broker.hivemq.com"        // публічний MQTT брокер
+#define MQTT_PORT      1883                       // plain TCP, без TLS
+#define MQTT_CLIENT_ID "esp32-demo-a"             // унікальний Client ID
+#define TOPIC_SENSORS  "iot-course/demo/sensors"  // топік для публікації
+
+#define PUBLISH_INTERVAL  10000                   // інтервал публікації, мс
+#define RECONNECT_INTERVAL 5000                   // інтервал між спробами reconnect, мс
+```
+
+---
+
+## Опис main.cpp
+
+### 1. Підключення до Wi-Fi — `connectWifi()`
+
+```cpp
+bool connectWifi() {
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD, 6);
+    // канал 6 — пропускає сканування, економить ~4 секунди в Wokwi
+    // чекає підключення з таймаутом WIFI_TIMEOUT
+    // повертає true при успіху, false при таймауті
+}
+```
+
+- Викликається один раз у `setup()`.
+- Канал 6 (`WiFi.begin(..., 6)`) — оптимізація для Wokwi-GUEST, пропускає фазу сканування.
+- Якщо за `WIFI_TIMEOUT` мс з'єднання не встановлено — повертає `false`.
+
+### 2. Підключення до MQTT брокера — `connectMQTT()`
+
+```cpp
+bool connectMQTT() {
+    if (mqttClient.connect(MQTT_CLIENT_ID)) {
+        // підключено — повертає true
+    }
+    // mqttClient.state() — код помилки при невдачі:
+    // -4 = таймаут, -2 = сервер не знайдено, 5 = відмовлено в доступі
+}
+```
+
+- MQTT Client ID має бути унікальним на брокері.
+- Якщо два клієнти мають однаковий Client ID — перший буде відключений.
+- `setKeepAlive(60)` — ESP32 надсилає PING брокеру кожні 60 секунд.
+- `setSocketTimeout(30)` — таймаут TCP сокету 30 секунд.
+
+### 3. Публікація даних — `publishData(temperature, humidity)`
+
+```cpp
+void publishData(float temperature, float humidity) {
+    // перевіряє mqttClient.connected() — якщо не підключено, пропускає
+    // формує JSON через snprintf() — безпечно для heap (без String)
+    // виконує mqttClient.publish() і виводить результат у Serial
+}
+```
+
+JSON-тіло повідомлення:
+
+```json
+{"temperature":24.5,"humidity":55.0}
+```
+
+`snprintf()` замість Arduino `String` — уникаємо фрагментації heap (Заняття 4).
+
+### 4. Неблокуючий таймер і reconnect
+
+```cpp
+void loop() {
+    if (mqttClient.connected()) {
+        mqttClient.loop();  // підтримує Keep Alive і обробляє вхідні повідомлення
+
+        if ((now - lastPublish) > PUBLISH_INTERVAL) {
+            publishData(...);
+        }
+    } else {
+        if ((now - lastReconnectAttempt) > RECONNECT_INTERVAL) {
+            connectMQTT();  // спроба reconnect раз на 5 секунд
+        }
+    }
+}
+```
+
+`mqttClient.loop()` викликається тільки коли підключено — без нього брокер не отримує PING і відключає клієнта.
+
+---
+
+## Вивід у Serial
+
+```
+ESP32-A старт
+[Wi-Fi] Підключаємось.... OK
+[Wi-Fi] IP: 10.13.37.2
+[MQTT] Підключаємось до broker.hivemq.com... OK
+[MQTT] Публікуємо: {"temperature":27.0,"humidity":55.0}
+[MQTT] OK
+[MQTT] Публікуємо: {"temperature":19.0,"humidity":55.0}
+[MQTT] OK
+```
+
+При втраті з'єднання:
+
+```
+[MQTT] З'єднання втрачено — перепідключаємось...
+[MQTT] Підключаємось до broker.hivemq.com... OK
+```
+
+---
+
+## Моніторинг через HiveMQ веб-клієнт
+
+1. Відкрити `hivemq.com/demos/websocket-client`
+2. Host: `broker.hivemq.com`, Port: `8884`
+3. Натиснути **Connect** (зелена крапка = підключено)
+4. **Add New Topic Subscription** → топік: `iot-course/demo/#`
+5. Запустити симуляцію в Wokwi — повідомлення з'являться в секції **Messages**
+
+---
+
+## Як запустити
+
+1. Відкрити проєкт у VS Code з розширенням **PlatformIO**.
+2. Для симуляції — встановити розширення **Wokwi for VS Code** і натиснути `F1 → Wokwi: Start Simulator`.
+3. Відкрити **Serial Monitor** (швидкість: `115200`).
+4. Кожні 10 с у Serial з'являється рядок `[MQTT] Публікуємо: ...` з підтвердженням від брокера.
+
+---
+
+## Рекомендована література
+
+### Документація
+
+| Ресурс | Посилання |
+|---|---|
+| PubSubClient — офіційна документація | [pubsubclient.knolleary.net](https://pubsubclient.knolleary.net) |
+| HiveMQ публічний брокер | [hivemq.com/mqtt/public-mqtt-broker](https://www.hivemq.com/mqtt/public-mqtt-broker) |
+| MQTT Essentials серія | [hivemq.com/blog/mqtt-essentials-part-1-introducing-mqtt](https://www.hivemq.com/blog/mqtt-essentials-part-1-introducing-mqtt/) |
+| Wokwi — ESP32 Wi-Fi у симуляторі | [docs.wokwi.com/guides/esp32-wifi](https://docs.wokwi.com/guides/esp32-wifi) |
+| Random Nerd Tutorials — ESP32 MQTT | [randomnerdtutorials.com/esp32-mqtt-publish-subscribe-arduino-ide](https://randomnerdtutorials.com/esp32-mqtt-publish-subscribe-arduino-ide/) |
+
+### Відео
+
+- **MQTT Essentials відео серія** — [youtube.com/playlist?list=PLRkdoPznE1EMXLW6XoYLGd4uUaB6wB0wd](https://www.youtube.com/playlist?list=PLRkdoPznE1EMXLW6XoYLGd4uUaB6wB0wd)
+
+### Книги
+
+- **"Internet of Things with ESP32"** — Agus Kurniawan
+  Практичні приклади Wi-Fi, HTTP, MQTT на ESP32.
+
+- **"Making Embedded Systems"** — Elecia White
+  Мережева взаємодія, протоколи та надійність з'єднань.

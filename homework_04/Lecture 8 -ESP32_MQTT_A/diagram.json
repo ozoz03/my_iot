@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "author": "Your Name",
+  "editor": "wokwi",
+  "parts": [
+    { "type": "board-esp32-devkit-v1", "id": "esp", "top": 0, "left": 0, "attrs": {} },
+    { "type": "wokwi-resistor", "id": "r1", "top": 80, "left": 200, "attrs": { "value": "220" } },
+    { "type": "wokwi-led", "id": "led1", "top": 140, "left": 208, "attrs": { "color": "red" } },
+    { "type": "wokwi-pushbutton", "id": "btn1", "top": -144.1, "left": 137.9, "rotate": 90, "attrs": { "color": "green" } },
+    { "type": "wokwi-photoresistor-sensor", "id": "ldr1", "top": 300.39, "left":-200.26, "attrs": {} },
+    { "type": "wokwi-dht22", "id": "dht1", "top": -100, "left": 280, "attrs": {} }
+  ],
+  "connections": [
+    ["esp:TX0", "$serialMonitor:RX", "", []],
+    ["esp:RX0", "$serialMonitor:TX", "", []],
+    ["esp:D2", "r1:1", "green", []],
+    ["r1:2", "led1:A", "green", []],
+    ["led1:C", "esp:GND.1", "black", []],
+    ["btn1:1.r", "esp:D5", "black", []],
+    ["btn1:2.l", "esp:GND.2", "black", []],
+    ["ldr1:VCC", "esp:3V3", "red", []],
+    ["ldr1:GND", "esp:GND.2", "black", []],
+    ["ldr1:DO", "esp:D14", "green", []],
+    ["ldr1:AO", "esp:D34", "green", []],
+    ["dht1:VCC", "esp:3V3", "red", []],
+    ["dht1:GND", "esp:GND.1", "black", []],
+    ["dht1:SDA", "esp:D4", "yellow", []]
+  ],
+  "dependencies": {}
+}
