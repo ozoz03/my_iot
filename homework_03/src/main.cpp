@@ -53,9 +53,10 @@ struct SensorData {
   float temperature;
   float humidity;
   float lux;
+  bool  hasData;  // true лише після першого реального вимірювання
 };
 
-SensorData lastGoodData = { 0.0f, 0.0f, 0.0f };
+SensorData lastGoodData = { 0.0f, 0.0f, 0.0f, false };
 
 DHT dht(DHTT_PIN, DHTT_TYPE);
 
@@ -141,6 +142,7 @@ void readAndPrintSensors() {
     lastGoodData.humidity    = humidity;
   }
   lastGoodData.lux = lux;
+  lastGoodData.hasData = true;
 
   char tempStr[8];
   char humStr[8];
@@ -171,6 +173,11 @@ void readAndPrintSensors() {
 // ВІДПРАВКА ДАНИХ НА СЕРВЕР
 // ═══════════════════════════════════════════════════════════
 void sendData(const SensorData &data) {
+  if (!data.hasData) {
+    Serial.println("[HTTP] Ще немає жодного вимірювання — пропускаємо відправку");
+    return;
+  }
+
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("[HTTP] Wi-Fi недоступний — пропускаємо відправку, продовжуємо роботу");
     WiFi.reconnect();  // неблокуюча спроба відновити з'єднання у фоні
