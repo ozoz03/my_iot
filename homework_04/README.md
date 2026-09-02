@@ -118,6 +118,40 @@ iot-course/<ваше_ім'я>/status
 
 ---
 
+## Реалізація ДЗ4
+
+### Архітектура
+
+```
+ESP32-A (DHT22 + кнопка)              broker.hivemq.com              ESP32-B (LED)
+┌─────────────────────┐               ┌─────────────┐               ┌─────────────────────┐
+│ DHT22 → t, h         │──publish────▶│             │──deliver─────▶│ t>26°C → LED ON      │
+│ (кожні 10с)          │  sensors      │             │  sensors      │ t<20°C → LED OFF     │
+│                      │               │   Broker    │               │                      │
+│ Кнопка (debounce)    │──publish────▶│             │──deliver─────▶│ "manual_read" →       │
+│ → "manual_read"      │  commands     │             │  commands     │ blink LED x3 (QoS 1)  │
+└─────────────────────┘               └─────────────┘               └─────────────────────┘
+```
+
+Топіки використовують префікс `iot-course/ozoz03` (нік автора):
+
+| Топік | Хто публікує | Хто підписаний | Payload |
+|---|---|---|---|
+| `iot-course/ozoz03/sensors` | ESP32-A (кожні 10с) | ESP32-B (QoS 1) | `{"temperature":24.5,"humidity":55.0}` |
+| `iot-course/ozoz03/commands` | ESP32-A (на натискання кнопки) | ESP32-B (QoS 1) | `manual_read` |
+
+**Retry-логіка** (обидва пристрої): при втраті з'єднання — reconnect раз на 5 секунд, максимум 3 спроби поспіль; лічильник скидається одразу після успішного підключення. Реалізовано прапорцями `mqttReconnectAttempts` / `mqttReconnectExhausted` у `loop()`, без `delay()`.
+
+**Blink на ESP32-B** реалізовано неблокуюче: `onMessage()` лише виставляє прапорець, саме перемикання LED (3 рази ON/OFF) виконує `handleBlink()` у `loop()` через `millis()`.
+
+Деталі кожного проєкту — `Lecture 8 -ESP32_MQTT_A/README.md` та `Lecture 8 -ESP32_MQTT_B/README.md`.
+
+### Скріншоти
+
+_TODO: додати скріншот MQTT Explorer / MQTT Dashboard з історією повідомлень по підписці на `iot-course/ozoz03/#` (обидва топіки — sensors і commands)._
+
+---
+
 ## Залежності
 
 ```ini

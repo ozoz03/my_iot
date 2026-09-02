@@ -1,6 +1,6 @@
-# Лекція 8 — MQTT Publisher (ESP32-A)
+# Лекція 8 — MQTT Publisher (ESP32-A) — ДЗ4
 
-Демонстрація підключення ESP32 до публічного MQTT брокера та публікації сенсорних даних у топік. Неблокуючий таймер на `millis()` публікує пакет кожні 10 секунд. Автоматичний reconnect через `millis()` відновлює з'єднання без `delay()` (Arduino Framework, PlatformIO + Wokwi).
+Публікація реальних показників DHT22 (температура, вологість) у MQTT-топік кожні 10 секунд, і публікація команди `"manual_read"` при натисканні кнопки. Неблокуючий таймер на `millis()`. Автоматичний reconnect через `millis()` відновлює з'єднання без `delay()`, з обмеженням у 3 послідовні спроби (Arduino Framework, PlatformIO + Wokwi).
 
 ---
 
@@ -21,6 +21,7 @@ platformio.ini    — конфігурація PlatformIO (платформа, �
 ```ini
 lib_deps =
     knolleary/PubSubClient
+    adafruit/DHT sensor library
 ```
 
 `WiFi.h` входить до складу ESP32 Arduino core — додаткових бібліотек не потрібно.
@@ -30,17 +31,24 @@ lib_deps =
 ## Конфігурація
 
 ```cpp
-#define WIFI_SSID      "Wokwi-GUEST"             // SSID мережі (Wokwi симулятор)
-#define WIFI_PASSWORD  ""                         // пароль (порожній для Wokwi-GUEST)
-#define WIFI_TIMEOUT   10000                      // таймаут підключення, мс
+#define BUTTON_PIN 5                               // кнопка (INPUT_PULLUP)
+#define DHTT_PIN   4                               // DHT22 data pin
+#define DHTT_TYPE  DHT22
 
-#define MQTT_BROKER    "broker.hivemq.com"        // публічний MQTT брокер
-#define MQTT_PORT      1883                       // plain TCP, без TLS
-#define MQTT_CLIENT_ID "esp32-demo-a"             // унікальний Client ID
-#define TOPIC_SENSORS  "iot-course/demo/sensors"  // топік для публікації
+#define WIFI_SSID      "Wokwi-GUEST"               // SSID мережі (Wokwi симулятор)
+#define WIFI_PASSWORD  ""                           // пароль (порожній для Wokwi-GUEST)
+#define WIFI_TIMEOUT   10000                        // таймаут підключення, мс
 
-#define PUBLISH_INTERVAL  10000                   // інтервал публікації, мс
-#define RECONNECT_INTERVAL 5000                   // інтервал між спробами reconnect, мс
+#define MQTT_BROKER    "broker.hivemq.com"          // публічний MQTT брокер
+#define MQTT_PORT      1883                         // plain TCP, без TLS
+#define MQTT_CLIENT_ID "esp32-ozoz03-a"             // унікальний Client ID
+
+#define TOPIC_SENSORS  "iot-course/ozoz03/sensors"   // публікація {temperature, humidity}
+#define TOPIC_COMMANDS "iot-course/ozoz03/commands"  // публікація "manual_read"
+
+#define PUBLISH_INTERVAL           10000            // інтервал публікації, мс
+#define RECONNECT_INTERVAL         5000             // інтервал між спробами reconnect, мс
+#define MQTT_MAX_RECONNECT_ATTEMPTS 3               // максимум спроб reconnect поспіль
 ```
 
 ---
@@ -79,11 +87,12 @@ bool connectMQTT() {
 - `setKeepAlive(60)` — ESP32 надсилає PING брокеру кожні 60 секунд.
 - `setSocketTimeout(30)` — таймаут TCP сокету 30 секунд.
 
-### 3. Публікація даних — `publishData(temperature, humidity)`
+### 3. Публікація даних сенсорів — `publishSensors()`
 
 ```cpp
-void publishData(float temperature, float humidity) {
-    // перевіряє mqttClient.connected() — якщо не підключено, пропускає
+void publishSensors() {
+    // читає dht.readTemperature() / dht.readHumidity()
+    // якщо NaN (сенсор не готовий/помилка) — пропускає публікацію
     // формує JSON через snprintf() — безпечно для heap (без String)
     // виконує mqttClient.publish() і виводить результат у Serial
 }
@@ -97,25 +106,36 @@ JSON-тіло повідомлення:
 
 `snprintf()` замість Arduino `String` — уникаємо фрагментації heap (Заняття 4).
 
-### 4. Неблокуючий таймер і reconnect
+### 4. Ручний запит по кнопці — `publishManualRead()` + `handleButton()`
+
+Кнопка (GPIO5, `INPUT_PULLUP`) опитується з debounce (50 мс), як у ДЗ3. На стабільний перехід у `LOW` публікується рядок `"manual_read"` (не JSON) у `TOPIC_COMMANDS`.
+
+### 5. Неблокуючий таймер і reconnect з лімітом спроб
 
 ```cpp
 void loop() {
+    handleButton();
+
     if (mqttClient.connected()) {
         mqttClient.loop();  // підтримує Keep Alive і обробляє вхідні повідомлення
+        mqttReconnectAttempts = 0;
+        mqttReconnectExhausted = false;
 
         if ((now - lastPublish) > PUBLISH_INTERVAL) {
-            publishData(...);
+            publishSensors();
         }
-    } else {
+    } else if (!mqttReconnectExhausted) {
         if ((now - lastReconnectAttempt) > RECONNECT_INTERVAL) {
-            connectMQTT();  // спроба reconnect раз на 5 секунд
+            mqttReconnectAttempts++;
+            if (!connectMQTT() && mqttReconnectAttempts >= MQTT_MAX_RECONNECT_ATTEMPTS) {
+                mqttReconnectExhausted = true;  // більше не намагаємось reconnect
+            }
         }
     }
 }
 ```
 
-`mqttClient.loop()` викликається тільки коли підключено — без нього брокер не отримує PING і відключає клієнта.
+`mqttClient.loop()` викликається тільки коли підключено — без нього брокер не отримує PING і відключає клієнта. Після 3 невдалих спроб поспіль (кожна раз на 5 секунд) пристрій припиняє намагатись reconnect; лічильник і прапорець `mqttReconnectExhausted` скидаються одразу після успішного підключення.
 
 ---
 
@@ -128,15 +148,20 @@ ESP32-A старт
 [MQTT] Підключаємось до broker.hivemq.com... OK
 [MQTT] Публікуємо: {"temperature":27.0,"humidity":55.0}
 [MQTT] OK
-[MQTT] Публікуємо: {"temperature":19.0,"humidity":55.0}
+[MQTT] Публікуємо команду: manual_read
 [MQTT] OK
 ```
 
-При втраті з'єднання:
+При втраті з'єднання (максимум 3 спроби, потім пауза до наступного успішного `mqttClient.loop()`):
 
 ```
-[MQTT] З'єднання втрачено — перепідключаємось...
-[MQTT] Підключаємось до broker.hivemq.com... OK
+[MQTT] З'єднання втрачено — спроба 1/3
+[MQTT] Підключаємось до broker.hivemq.com... помилка: -2
+[MQTT] З'єднання втрачено — спроба 2/3
+[MQTT] Підключаємось до broker.hivemq.com... помилка: -2
+[MQTT] З'єднання втрачено — спроба 3/3
+[MQTT] Підключаємось до broker.hivemq.com... помилка: -2
+[MQTT] Досягнуто максимум спроб reconnect — припиняємо, поки Wi-Fi/брокер не відновляться
 ```
 
 ---
