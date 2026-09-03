@@ -198,3 +198,6 @@ lib_deps =
 | MQTT Essentials серія | [hivemq.com/blog/mqtt-essentials-part-1-introducing-mqtt](https://www.hivemq.com/blog/mqtt-essentials-part-1-introducing-mqtt/) |
 | MQTT Explorer | [mqtt-explorer.com](https://mqtt-explorer.com) |
 | Wokwi Wi-Fi | [docs.wokwi.com/guides/esp32-wifi](https://docs.wokwi.com/guides/esp32-wifi) |
+
+
+![Робота](images/screen.png)
