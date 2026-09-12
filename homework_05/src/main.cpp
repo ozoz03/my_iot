@@ -13,7 +13,7 @@
 // КОНФІГУРАЦІЯ MQTT (AWS IoT Core)
 // ═══════════════════════════════════════════════════════════
 #define MQTT_PORT      8883                            // MQTT over TLS, НЕ 1883!
-#define TOPIC_TELEMETRY "iot-course/demo/telemetry"     // топік для публікації
+#define TOPIC_TELEMETRY "iot-course/ozasymenko/sensors/data"     // топік для публікації
 
 // Таймер reconnect — чекаємо 5 секунд між спробами
 unsigned long lastReconnectAttempt = 0;
@@ -22,7 +22,7 @@ unsigned long lastReconnectAttempt = 0;
 // ═══════════════════════════════════════════════════════════
 // ТАЙМЕР ПУБЛІКАЦІЇ
 // ═══════════════════════════════════════════════════════════
-#define PUBLISH_INTERVAL 10000  // публікуємо раз на 10 секунд
+#define PUBLISH_INTERVAL 30000  // публікуємо раз на 30 секунд
 
 unsigned long lastPublish = 0;
 
@@ -170,13 +170,21 @@ void setup() {
 // LOOP — логіка ІДЕНТИЧНА Заняттю 8
 // ═══════════════════════════════════════════════════════════
 void loop() {
+    float temperature = dht.readTemperature();
+    float humidity    = dht.readHumidity();
+
+    if (isnan(temperature) || isnan(humidity)) {
+        Serial.println("[DHT] Помилка читання сенсора — пропускаємо публікацію");
+        return;
+    }
+
     if (mqttClient.connected()) {
         mqttClient.loop();  // ОБОВ'ЯЗКОВО — підтримує Keep Alive
 
         unsigned long now = millis();
         if ((now - lastPublish) > PUBLISH_INTERVAL) {
             lastPublish = now;
-            publishData(random(15, 40), 55.0);
+            publishData(temperature, humidity);
         }
     } else {
         unsigned long now = millis();
