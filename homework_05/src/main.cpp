@@ -2,7 +2,17 @@
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <PubSubClient.h>
+#include "DHT.h"
 #include "secrets.h"
+
+// ═══════════════════════════════════════════════════════════
+// ПІНИ
+// ═══════════════════════════════════════════════════════════
+#define LED_PIN    2
+#define BUTTON_PIN 5
+#define LDR_PIN    34
+#define DHTT_PIN   4
+#define DHTT_TYPE  DHT22
 
 // ═══════════════════════════════════════════════════════════
 // КОНФІГУРАЦІЯ WI-FI
@@ -12,30 +22,102 @@
 // ═══════════════════════════════════════════════════════════
 // КОНФІГУРАЦІЯ MQTT (AWS IoT Core)
 // ═══════════════════════════════════════════════════════════
-#define MQTT_PORT      8883                            // MQTT over TLS, НЕ 1883!
-#define TOPIC_TELEMETRY "iot-course/ozasymenko/sensors/data"     // топік для публікації
+#define MQTT_PORT       8883                                  // MQTT over TLS, НЕ 1883!
+#define TOPIC_TELEMETRY "iot-course/ozasymenko/sensors/data"  // топік для публікації
 
 // Таймер reconnect — чекаємо 5 секунд між спробами
 unsigned long lastReconnectAttempt = 0;
 #define RECONNECT_INTERVAL 5000  // мс
 
 // ═══════════════════════════════════════════════════════════
-// ТАЙМЕР ПУБЛІКАЦІЇ
+// ТАЙМІНГИ
 // ═══════════════════════════════════════════════════════════
-#define PUBLISH_INTERVAL 30000  // публікуємо раз на 30 секунд
+#define DEBOUNCE_DELAY   50     // мс
+#define MONITOR_INTERVAL 5000   // мс — читання сенсорів у режимі "моніторинг"
+#define PUBLISH_INTERVAL 30000  // мс — публікація в AWS IoT Core
 
+// Поріг освітленості (люкси), нижче якого вмикається LED.
+// Значення підібране під дефолтну яскравість LDR-слайдера у Wokwi;
+// при тестуванні перетягніть повзунок фоторезистора, щоб побачити обидва стани.
+#define LUX_THRESHOLD 100.0f
+
+// ═══════════════════════════════════════════════════════════
+// РЕЖИМИ РОБОТИ
+// ═══════════════════════════════════════════════════════════
+enum Mode { MODE_SILENT, MODE_MONITORING };
+Mode currentMode = MODE_SILENT;
+
+// ── Debounce кнопки ──────────────────────────────────────
+bool lastRawState = HIGH;
+bool stableState  = HIGH;
+unsigned long lastDebounceTime = 0;
+
+// ── Неблокуючі таймери ───────────────────────────────────
+unsigned long lastMonitor = 0;
 unsigned long lastPublish = 0;
+
+// ── Дані сенсорів (зберігаються між циклами публікації) ──
+struct SensorData {
+  float temperature;
+  float humidity;
+  float lux;
+  bool  hasData;  // true лише після першого реального вимірювання
+};
+
+SensorData lastGoodData = { 0.0f, 0.0f, 0.0f, false };
+
+DHT dht(DHTT_PIN, DHTT_TYPE);
 
 // ═══════════════════════════════════════════════════════════
 // MQTT + TLS КЛІЄНТ
 // ═══════════════════════════════════════════════════════════
-// WiFiClientSecure замість WiFiClient — ЄДИНА зміна на цьому рівні (слайд 17)
-// PubSubClient — той самий, що й у Занятті 8, без жодних змін
+// WiFiClientSecure замість WiFiClient — єдина зміна на цьому рівні (слайд 17)
 WiFiClientSecure net;
 PubSubClient      mqttClient(net);
 
 // ═══════════════════════════════════════════════════════════
-// WI-FI — без змін із Заняття 8
+// КОНВЕРТАЦІЯ ADC → LUX
+// ═══════════════════════════════════════════════════════════
+float adcToLux(int adcValue) {
+  const float GAMMA = 0.7f;
+  const float RL10  = 33.0f;  // опір LDR при 10 lux (кОм)
+
+  float voltage    = adcValue / 4096.0f * 3.3f;
+  float resistance = 2000.0f * voltage / (1.0f - voltage / 3.3f);
+  return pow(RL10 * 1e3 * pow(10, GAMMA) / resistance, (1.0f / GAMMA));
+}
+
+// ═══════════════════════════════════════════════════════════
+// КНОПКА З DEBOUNCE — перемикання "тиша" / "моніторинг"
+// ═══════════════════════════════════════════════════════════
+void handleButton() {
+  bool raw = digitalRead(BUTTON_PIN);
+
+  if (raw != lastRawState) {
+    lastDebounceTime = millis();
+  }
+
+  if ((millis() - lastDebounceTime) > DEBOUNCE_DELAY) {
+    if (raw != stableState) {
+      stableState = raw;
+
+      if (stableState == LOW) {  // INPUT_PULLUP: LOW = кнопку натиснуто
+        currentMode = (currentMode == MODE_SILENT) ? MODE_MONITORING : MODE_SILENT;
+        Serial.print("[Режим] ");
+        Serial.println(currentMode == MODE_MONITORING ? "МОНІТОРИНГ" : "ТИША");
+
+        if (currentMode == MODE_SILENT) {
+          digitalWrite(LED_PIN, LOW);  // у тиші LED не повинен лишатись увімкненим
+        }
+      }
+    }
+  }
+
+  lastRawState = raw;
+}
+
+// ═══════════════════════════════════════════════════════════
+// WI-FI
 // ═══════════════════════════════════════════════════════════
 bool connectWifi() {
     Serial.print("[Wi-Fi] Підключаємось");
@@ -59,7 +141,7 @@ bool connectWifi() {
 }
 
 // ═══════════════════════════════════════════════════════════
-// NTP — синхронізація часу (слайд 18)
+// NTP — синхронізація часу
 // БЕЗ ЦЬОГО TLS ВПАДЕ, навіть з правильними сертифікатами:
 // ESP32 стартує з 1970 року, і handshake вважає сертифікат AWS
 // "ще не дійсним", бо 1970 < дата видачі сертифіката
@@ -93,13 +175,19 @@ void connectAWS() {
     // 1. Wi-Fi
     connectWifi();
 
-    // 2. НОВЕ: синхронізуємо час — до сертифікатів, до connect()
+    // 2. синхронізуємо час — до сертифікатів, до connect()
     syncTime();
 
-    // 3. НОВЕ: заряджаємо три файли зі слайда 10 в TLS-клієнт
+    // 3. заряджаємо три файли з secrets.h у TLS-клієнт
     net.setCACert(AWS_CERT_CA);
     net.setCertificate(AWS_CERT_CRT);
     net.setPrivateKey(AWS_CERT_PRIVATE);
+
+    // За замовчуванням TLS-хендшейк може мовчки чекати до 120с (без жодного
+    // виводу в Serial) — виглядає як "зависання". Обмежуємо, щоб помилка
+    // (невірний endpoint/сертифікат/час) проявлялась швидко.
+    net.setTimeout(10);           // TCP connect + читання, секунди
+    net.setHandshakeTimeout(15);  // TLS-хендшейк, секунди
 
     // 4. Вказуємо брокер: наш AWS endpoint, порт 8883
     mqttClient.setServer(AWS_IOT_ENDPOINT, MQTT_PORT);
@@ -111,7 +199,7 @@ void connectAWS() {
 
 // ═══════════════════════════════════════════════════════════
 // MQTT CONNECT
-// Client ID = THINGNAME — Policy обмежує Connect саме по ньому (слайд 16)
+// Client ID = THINGNAME — Policy обмежує Connect саме по ньому
 // ═══════════════════════════════════════════════════════════
 bool connectMQTT() {
     Serial.print("[MQTT] Підключаємось до AWS IoT Core...");
@@ -129,19 +217,72 @@ bool connectMQTT() {
 }
 
 // ═══════════════════════════════════════════════════════════
-// ПУБЛІКАЦІЯ ДАНИХ — без змін із Заняття 8
+// ЗЧИТУВАННЯ СЕНСОРІВ + КЕРУВАННЯ LED (лише в режимі "моніторинг")
 // ═══════════════════════════════════════════════════════════
-void publishData(float temperature, float humidity) {
+void readAndPrintSensors() {
+  int   rawLdr = analogRead(LDR_PIN);
+  float lux    = adcToLux(rawLdr);
+
+  float temperature = dht.readTemperature();
+  float humidity    = dht.readHumidity();
+  bool  dhtOk        = !isnan(temperature) && !isnan(humidity);
+
+  if (!dhtOk) {
+    Serial.println("[Помилка] DHT22: сенсор повернув некоректні дані (NaN) — пропускаємо, продовжуємо роботу");
+  } else {
+    lastGoodData.temperature = temperature;
+    lastGoodData.humidity    = humidity;
+  }
+  lastGoodData.lux = lux;
+  lastGoodData.hasData = true;
+
+  char tempStr[8];
+  char humStr[8];
+  if (dhtOk) {
+    snprintf(tempStr, sizeof(tempStr), "%.1f", temperature);
+    snprintf(humStr, sizeof(humStr), "%.1f", humidity);
+  } else {
+    strcpy(tempStr, "err");
+    strcpy(humStr, "err");
+  }
+
+  Serial.print("[Сенсори] t=");
+  Serial.print(tempStr);
+  Serial.print("C  h=");
+  Serial.print(humStr);
+  Serial.print("%  lux=");
+  Serial.print(lux, 1);
+  Serial.print(" (ADC ");
+  Serial.print(rawLdr);
+  Serial.println(")");
+
+  bool ledOn = lux < LUX_THRESHOLD;
+  digitalWrite(LED_PIN, ledOn ? HIGH : LOW);
+  Serial.println(ledOn ? "[LED] Увімкнено (низька освітленість)" : "[LED] Вимкнено");
+}
+
+// ═══════════════════════════════════════════════════════════
+// ПУБЛІКАЦІЯ ДАНИХ У AWS IOT CORE
+// ═══════════════════════════════════════════════════════════
+void publishData(const SensorData &data) {
+    if (!data.hasData) {
+        Serial.println("[MQTT] Ще немає жодного вимірювання — пропускаємо публікацію");
+        return;
+    }
+
     if (!mqttClient.connected()) {
         Serial.println("[MQTT] Не підключено — пропускаємо");
         return;
     }
 
-    // snprintf замість String — безпечно для heap (Заняття 4)
-    char payload[80];
+    time_t now;
+    time(&now);
+
+    // snprintf замість String — безпечно для heap
+    char payload[160];
     snprintf(payload, sizeof(payload),
-        "{\"temperature\":%.1f,\"humidity\":%.1f}",
-        temperature, humidity);
+        "{\"device_id\":\"%s\",\"timestamp\":%lu,\"temperature\":%.1f,\"humidity\":%.1f,\"lux\":%.1f}",
+        THINGNAME, (unsigned long)now, data.temperature, data.humidity, data.lux);
 
     Serial.print("[MQTT] Публікуємо: ");
     Serial.println(payload);
@@ -156,7 +297,13 @@ void publishData(float temperature, float humidity) {
 void setup() {
     Serial.begin(115200);
     delay(500);
-    Serial.println("ESP32-A (AWS IoT Core edition) старт");
+    Serial.println("ESP32 старт (AWS IoT Core edition). Поточний режим: ТИША");
+
+    pinMode(LED_PIN, OUTPUT);
+    pinMode(BUTTON_PIN, INPUT_PULLUP);
+    pinMode(LDR_PIN, INPUT);
+
+    dht.begin();
 
     connectAWS();
 
@@ -167,34 +314,32 @@ void setup() {
 }
 
 // ═══════════════════════════════════════════════════════════
-// LOOP — логіка ІДЕНТИЧНА Заняттю 8
+// LOOP
 // ═══════════════════════════════════════════════════════════
 void loop() {
-    float temperature = dht.readTemperature();
-    float humidity    = dht.readHumidity();
+    unsigned long now = millis();
 
-    if (isnan(temperature) || isnan(humidity)) {
-        Serial.println("[DHT] Помилка читання сенсора — пропускаємо публікацію");
-        return;
+    handleButton();
+
+    if (currentMode == MODE_MONITORING && (now - lastMonitor) >= MONITOR_INTERVAL) {
+        lastMonitor = now;
+        readAndPrintSensors();
     }
 
     if (mqttClient.connected()) {
         mqttClient.loop();  // ОБОВ'ЯЗКОВО — підтримує Keep Alive
 
-        unsigned long now = millis();
-        if ((now - lastPublish) > PUBLISH_INTERVAL) {
+        if ((now - lastPublish) >= PUBLISH_INTERVAL) {
             lastPublish = now;
-            publishData(temperature, humidity);
+            publishData(lastGoodData);
         }
     } else {
-        unsigned long now = millis();
         if (now - lastReconnectAttempt > RECONNECT_INTERVAL) {
             lastReconnectAttempt = now;
             Serial.println("[MQTT] З'єднання втрачено — перепідключаємось...");
 
             // Явно закриваємо стару TLS-сесію перед новою спробою —
             // інакше mbedTLS-контекст може лишитись "напівживим"
-            // і з часом призвести до витоку пам'яті (Заняття 4)
             net.stop();
 
             connectMQTT();
