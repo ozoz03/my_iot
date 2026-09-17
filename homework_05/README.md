@@ -43,39 +43,39 @@
 ```
 ## Thing
 
-![Thing](.\images\Thing.png)
+![Thing](./images/Thing.png)
 
 ## Rules Engine
 
-![Rules](.\images\Rules.png)
+![Rules](./images/Rules.png)
 
 
 ### StoreTelemetry rule
 
-![Store](.\images\Store.png)
+![Store](./images/Store.png)
 
 
 #### On Error
-![Error](.\images\Error.png)
+![Error](./images/Error.png)
 
 #### TemperatureMoreThan28 rule
-![Temp 28](.\images\28.png)
+![Temp 28](./images/28.png)
 
 
 ## DynamoDB
 
 ### DB table
-![DB table](.\images\DB.png)
+![DB table](./images/DB.png)
 
 ### Explore Items - Scan
-![DB table](.\images\table.png)
+![DB table](./images/table.png)
 
 ## CloudWatch
 ### Cloud Watch
-![CW](.\images\CW.png)
+![CW](./images/CW.png)
 #### Log Streams
-![LogStreams](LogStreams.png)
+![LogStreams](./images/LogStreams.png)
 #### Log Events
-![Log events](.\images\LogEvents.png)
+![Log events](./images/LogEvents.png)
 ---
 
