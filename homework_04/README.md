@@ -21,7 +21,7 @@ ESP32-A (Publisher)          broker.hivemq.com          ESP32-B (Subscriber)
 ## Структура проєктів
 
 ```
-Lecture 8/
+homework_04/
 ├── README.md                ← цей файл
 ├── ESP32_MQTT_A/            ← Publisher: підключення + публікація
 │   ├── README.md
@@ -43,7 +43,7 @@ Lecture 8/
 
 | Топік | Хто публікує | Хто підписаний |
 |---|---|---|
-| `iot-course/demo/sensors` | ESP32-A | ESP32-B |
+| `iot-course/ozoz03/sensors/temperature` | ESP32-A | ESP32-B |
 
 ---
 
@@ -68,7 +68,7 @@ URL: `hivemq.com/demos/websocket-client`
 2. Переконатись що Host: `broker.hivemq.com`, Port: `8884`
 3. Натиснути **Connect** — дочекатись зеленої крапки `connected`
 4. Натиснути **Add New Topic Subscription**
-5. Topic: `iot-course/demo/#`, QoS: `0` → **Subscribe**
+5. Topic: `iot-course/ozoz03/#`, QoS: `0` → **Subscribe**
 6. Запустити симуляцію в Wokwi — повідомлення з'являться в секції **Messages**
 
 ### Відомий баг
@@ -126,38 +126,56 @@ iot-course/<ваше_ім'я>/status
 ESP32-A (DHT22 + кнопка)              broker.hivemq.com              ESP32-B (LED)
 ┌─────────────────────┐               ┌─────────────┐               ┌─────────────────────┐
 │ DHT22 → t, h         │──publish────▶│             │──deliver─────▶│ t>26°C → LED ON      │
-│ (кожні 10с)          │  sensors      │             │  sensors      │ t<20°C → LED OFF     │
-│                      │               │   Broker    │               │                      │
+│ (кожні 10с,          │  sensors/*    │             │  sensors/     │ t<20°C → LED OFF     │
+│  окремі підтопіки)   │               │             │  temperature  │  → publish            │
+│                      │               │   Broker    │               │    actuators/led      │
 │ Кнопка (debounce)    │──publish────▶│             │──deliver─────▶│ "manual_read" →       │
-│ → "manual_read"      │  commands     │             │  commands     │ blink LED x3 (QoS 1)  │
+│ → "manual_read"      │  commands     │             │  commands     │ blink LED x3          │
+│                      │               │             │               │                      │
+│ LWT → offline        │──publish────▶│             │◀─────publish──│ LWT → offline         │
+│ (online при connect) │  status/a     │             │  status/b     │ (online при connect)  │
 └─────────────────────┘               └─────────────┘               └─────────────────────┘
 ```
 
-Топіки використовують префікс `iot-course/ozoz03` (нік автора):
+Топіки використовують префікс `iot-course/ozoz03` (нік автора) з ієрархією за призначенням (окремі підтопіки на кожен показник — можна підписатись без розбору JSON; `status` разом з LWT показує, чи пристрій онлайн):
 
 | Топік | Хто публікує | Хто підписаний | Payload |
 |---|---|---|---|
-| `iot-course/ozoz03/sensors` | ESP32-A (кожні 10с) | ESP32-B (QoS 1) | `{"temperature":24.5,"humidity":55.0}` |
-| `iot-course/ozoz03/commands` | ESP32-A (на натискання кнопки) | ESP32-B (QoS 1) | `manual_read` |
+| `iot-course/ozoz03/sensors/temperature` | ESP32-A (кожні 10с) | ESP32-B (subscribe QoS 1*) | `24.5` |
+| `iot-course/ozoz03/sensors/humidity` | ESP32-A (кожні 10с) | — | `55.0` |
+| `iot-course/ozoz03/commands` | ESP32-A (на натискання кнопки) | ESP32-B (subscribe QoS 1*) | `manual_read` |
+| `iot-course/ozoz03/actuators/led` | ESP32-B (при зміні стану LED) | — | `ON` / `OFF` (retained) |
+| `iot-course/ozoz03/status/esp32-a` | ESP32-A (online при connect, LWT offline) | — | `online` / `offline` (retained) |
+| `iot-course/ozoz03/status/esp32-b` | ESP32-B (online при connect, LWT offline) | — | `online` / `offline` (retained) |
 
-**Retry-логіка** (обидва пристрої): при втраті з'єднання — reconnect раз на 5 секунд, максимум 3 спроби поспіль; лічильник скидається одразу після успішного підключення. Реалізовано прапорцями `mqttReconnectAttempts` / `mqttReconnectExhausted` у `loop()`, без `delay()`.
+\* B викликає `subscribe(topic, 1)`, але фактична доставка — **QoS 0**, не гарантована: брокер доставляє повідомлення з мінімумом {QoS публікації, QoS підписки}, а `PubSubClient::publish()` завжди публікує на QoS 0 (параметра QoS у нього немає). `subscribe(..., 1)` тут коректний, просто не змінює фактичний рівень доставки, поки видавець сам не публікує на QoS ≥ 1 — а PubSubClient так не вміє.
+
+**Retry-логіка** (обидва пристрої, `maintainConnection()` у `loop()`, без `delay()`): при втраті з'єднання — reconnect раз на 5 секунд, максимум 3 спроби поспіль; якщо цикл спроб вичерпано — пауза 60 секунд, потім лічильник скидається і починається новий цикл (пристрій не зависає офлайн назавжди). Якщо причина саме у відсутньому Wi-Fi — MQTT-спроби не витрачаються, натомість неблокуючий `WiFi.reconnect()`.
 
 **Blink на ESP32-B** реалізовано неблокуюче: `onMessage()` лише виставляє прапорець, саме перемикання LED (3 рази ON/OFF) виконує `handleBlink()` у `loop()` через `millis()`.
 
-Деталі кожного проєкту — `Lecture 8 -ESP32_MQTT_A/README.md` та `Lecture 8 -ESP32_MQTT_B/README.md`.
+Деталі кожного проєкту — `ESP32_MQTT_A/README.md` та `ESP32_MQTT_B/README.md`.
 
 ### Скріншоти
 
-_TODO: додати скріншот MQTT Explorer / MQTT Dashboard з історією повідомлень по підписці на `iot-course/ozoz03/#` (обидва топіки — sensors і commands)._
+![Історія повідомлень MQTT — підписка на iot-course/ozoz03/#](images/messages.png)
 
 ---
 
 ## Залежності
 
+Обидва проєкти:
+
 ```ini
 lib_deps =
     knolleary/PubSubClient
-    adafruit/DHT sensor library    ← для ДЗ 4
+```
+
+ESP32_MQTT_A додатково (читає DHT22 — B цю бібліотеку не підключає, LED не потребує):
+
+```ini
+lib_deps =
+    adafruit/DHT sensor library
 ```
 
 ---
@@ -165,7 +183,7 @@ lib_deps =
 ## Порядок запуску
 
 1. Запустити **ESP32-A** у Wokwi — дочекатись `[MQTT] OK` у Serial
-2. Відкрити HiveMQ веб-клієнт — підписатись на `iot-course/demo/#`
+2. Відкрити HiveMQ веб-клієнт — підписатись на `iot-course/ozoz03/#`
 3. Запустити **ESP32-B** у другому вікні Wokwi
 4. ESP32-B отримує повідомлення від ESP32-A і керує LED
 
@@ -174,17 +192,17 @@ lib_deps =
 ## Що робить кожен проєкт
 
 ### ESP32_MQTT_A — Publisher
-- Підключається до Wi-Fi і MQTT брокера
-- Публікує `{"temperature":..., "humidity":...}` раз на 10 секунд
+- Підключається до Wi-Fi і MQTT брокера (з LWT — `status/esp32-a` → `offline` при нештатному розриві)
+- Публікує температуру і вологість окремими повідомленнями (`sensors/temperature`, `sensors/humidity`) раз на 10 секунд
 - Автоматичний reconnect через `millis()` — без `delay()`
 - Детальніше: `ESP32_MQTT_A/README.md`
 
 ### ESP32_MQTT_B — Subscriber
-- Підключається до Wi-Fi і MQTT брокера
-- Підписується на топік ESP32-A
+- Підключається до Wi-Fi і MQTT брокера (з LWT — `status/esp32-b` → `offline` при нештатному розриві)
+- Підписується на `sensors/temperature` та `commands` від ESP32-A
 - Callback `onMessage()` автоматично спрацьовує при вхідному повідомленні
-- Парсить температуру через `strstr()` + `atof()`
-- Вмикає LED якщо температура > 26°C, вимикає якщо < 20°C
+- Читає температуру напряму через `atof()` — без розбору JSON, топік уже містить лише число
+- Вмикає LED якщо температура > 26°C, вимикає якщо < 20°C; публікує новий стан у `actuators/led` (retained)
 - Детальніше: `ESP32_MQTT_B/README.md`
 
 ---
