@@ -24,15 +24,22 @@
 #define MQTT_PORT      1883                          // plain TCP, без TLS
 #define MQTT_CLIENT_ID "esp32-ozoz03-a"              // унікальний — не як у ESP32-B!
 
-#define TOPIC_BASE     "iot-course/ozoz03"
-#define TOPIC_SENSORS  TOPIC_BASE "/sensors"          // публікуємо temperature+humidity
-#define TOPIC_COMMANDS TOPIC_BASE "/commands"         // публікуємо "manual_read"
+#define TOPIC_BASE          "iot-course/ozoz03"
+#define TOPIC_SENSOR_TEMP   TOPIC_BASE "/sensors/temperature"  // окремий підтопік — без розбору JSON
+#define TOPIC_SENSOR_HUM    TOPIC_BASE "/sensors/humidity"     // окремий підтопік — без розбору JSON
+#define TOPIC_COMMANDS      TOPIC_BASE "/commands"             // публікуємо "manual_read"
+#define TOPIC_STATUS        TOPIC_BASE "/status/esp32-a"       // online/offline (retained, LWT)
 
 // Таймер reconnect — чекаємо 5 секунд між спробами,
-// максимум MQTT_MAX_RECONNECT_ATTEMPTS спроб поспіль
-unsigned long lastReconnectAttempt = 0;
-#define RECONNECT_INTERVAL       5000  // мс
-#define MQTT_MAX_RECONNECT_ATTEMPTS 3
+// максимум MQTT_MAX_RECONNECT_ATTEMPTS спроб поспіль. Якщо весь цикл спроб
+// вичерпано (Wi-Fi/брокер недоступні довше) — пауза RECONNECT_COOLDOWN,
+// потім лічильник скидається і цикл спроб починається знову. Так пристрій
+// ніколи не "застрягає" офлайн назавжди без reboot.
+unsigned long lastReconnectAttempt   = 0;
+unsigned long reconnectCooldownStart = 0;
+#define RECONNECT_INTERVAL       5000    // мс між спробами всередині циклу
+#define MQTT_MAX_RECONNECT_ATTEMPTS 3    // спроб поспіль перед паузою
+#define RECONNECT_COOLDOWN       60000   // мс паузи перед новим циклом спроб
 int  mqttReconnectAttempts  = 0;
 bool mqttReconnectExhausted = false;
 
@@ -90,8 +97,12 @@ bool connectMQTT() {
     Serial.print(MQTT_BROKER);
     Serial.print("...");
 
-    if (mqttClient.connect(MQTT_CLIENT_ID)) {
+    // LWT: якщо з'єднання обірветься нештатно (не через штатний stop()),
+    // брокер сам опублікує "offline" (retained) у TOPIC_STATUS — підписники
+    // одразу побачать, що пристрій відпав, навіть без активного опитування
+    if (mqttClient.connect(MQTT_CLIENT_ID, TOPIC_STATUS, 1, true, "offline")) {
         Serial.println(" OK");
+        mqttClient.publish(TOPIC_STATUS, "online", true);  // retained
         return true;
     }
 
@@ -119,17 +130,22 @@ void publishSensors() {
         return;
     }
 
-    // snprintf замість String — безпечно для heap (Заняття 4)
-    char payload[80];
-    snprintf(payload, sizeof(payload),
-        "{\"temperature\":%.1f,\"humidity\":%.1f}",
-        temperature, humidity);
+    // Кожен показник — окремим повідомленням у свій підтопік. Підписник
+    // може слухати лише потрібне значення (наприклад, лише температуру)
+    // без розбору JSON.
+    char tempPayload[8];
+    char humPayload[8];
+    snprintf(tempPayload, sizeof(tempPayload), "%.1f", temperature);
+    snprintf(humPayload,  sizeof(humPayload),  "%.1f", humidity);
 
-    Serial.print("[MQTT] Публікуємо: ");
-    Serial.println(payload);
+    Serial.print("[MQTT] Публікуємо temperature=");
+    Serial.print(tempPayload);
+    Serial.print(" humidity=");
+    Serial.println(humPayload);
 
-    bool ok = mqttClient.publish(TOPIC_SENSORS, payload);
-    Serial.println(ok ? "[MQTT] OK" : "[MQTT] Помилка публікації");
+    bool okTemp = mqttClient.publish(TOPIC_SENSOR_TEMP, tempPayload);
+    bool okHum  = mqttClient.publish(TOPIC_SENSOR_HUM, humPayload);
+    Serial.println((okTemp && okHum) ? "[MQTT] OK" : "[MQTT] Помилка публікації");
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -180,12 +196,59 @@ void setup() {
     pinMode(BUTTON_PIN, INPUT_PULLUP);
     dht.begin();
 
-    connectWifi();
+    bool wifiOk = connectWifi();
     mqttClient.setServer(MQTT_BROKER, MQTT_PORT);
     mqttClient.setKeepAlive(60);        // PING кожні 60 секунд
     mqttClient.setSocketTimeout(30);    // таймаут TCP сокету 30 секунд
-    if (connectMQTT()) {
+    if (wifiOk && connectMQTT()) {
         mqttReconnectAttempts = 0;
+    }
+    // Якщо Wi-Fi одразу не піднявся — connectMQTT() тут навіть не викликаємо
+    // (все одно провалиться без мережі); maintainConnection() у loop()
+    // сам піднімає Wi-Fi і потім MQTT.
+}
+
+// ═══════════════════════════════════════════════════════════
+// ПІДТРИМКА З'ЄДНАННЯ — викликається з loop(), коли MQTT не підключено
+// ═══════════════════════════════════════════════════════════
+void maintainConnection() {
+    unsigned long now = millis();
+
+    if (mqttReconnectExhausted) {
+        // Цикл із MQTT_MAX_RECONNECT_ATTEMPTS спроб вичерпано — чекаємо
+        // паузу RECONNECT_COOLDOWN, потім стартуємо новий цикл спроб
+        if (now - reconnectCooldownStart < RECONNECT_COOLDOWN) {
+            return;
+        }
+        Serial.println("[MQTT] Пауза закінчилась — починаємо новий цикл спроб reconnect");
+        mqttReconnectAttempts  = 0;
+        mqttReconnectExhausted = false;
+    }
+
+    // Не штурмуємо мережу/брокер — чекаємо RECONNECT_INTERVAL між спробами
+    if (now - lastReconnectAttempt <= RECONNECT_INTERVAL) return;
+    lastReconnectAttempt = now;
+
+    if (WiFi.status() != WL_CONNECTED) {
+        // Без Wi-Fi спроба MQTT завідомо провалиться — не витрачаємо на це
+        // лічильник спроб, а неблокуюче штовхаємо Wi-Fi реконект
+        Serial.println("[Wi-Fi] З'єднання втрачено — перепідключаємось...");
+        WiFi.reconnect();
+        return;
+    }
+
+    mqttReconnectAttempts++;
+    Serial.print("[MQTT] З'єднання втрачено — спроба ");
+    Serial.print(mqttReconnectAttempts);
+    Serial.print("/");
+    Serial.println(MQTT_MAX_RECONNECT_ATTEMPTS);
+
+    if (!connectMQTT() && mqttReconnectAttempts >= MQTT_MAX_RECONNECT_ATTEMPTS) {
+        mqttReconnectExhausted = true;
+        reconnectCooldownStart = now;
+        Serial.print("[MQTT] Досягнуто максимум спроб reconnect — пауза ");
+        Serial.print(RECONNECT_COOLDOWN / 1000);
+        Serial.println("с перед новим циклом");
     }
 }
 
@@ -208,22 +271,7 @@ void loop() {
             lastPublish = now;
             publishSensors();
         }
-    } else if (!mqttReconnectExhausted) {
-        // millis() таймер між спробами reconnect
-        // Не штурмуємо брокер — чекаємо RECONNECT_INTERVAL мс
-        unsigned long now = millis();
-        if (now - lastReconnectAttempt > RECONNECT_INTERVAL) {
-            lastReconnectAttempt = now;
-            mqttReconnectAttempts++;
-            Serial.print("[MQTT] З'єднання втрачено — спроба ");
-            Serial.print(mqttReconnectAttempts);
-            Serial.print("/");
-            Serial.println(MQTT_MAX_RECONNECT_ATTEMPTS);
-
-            if (!connectMQTT() && mqttReconnectAttempts >= MQTT_MAX_RECONNECT_ATTEMPTS) {
-                mqttReconnectExhausted = true;
-                Serial.println("[MQTT] Досягнуто максимум спроб reconnect — припиняємо, поки Wi-Fi/брокер не відновляться");
-            }
-        }
+    } else {
+        maintainConnection();
     }
 }

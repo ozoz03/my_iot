@@ -1,6 +1,6 @@
 # Лекція 8 — MQTT Publisher (ESP32-A) — ДЗ4
 
-Публікація реальних показників DHT22 (температура, вологість) у MQTT-топік кожні 10 секунд, і публікація команди `"manual_read"` при натисканні кнопки. Неблокуючий таймер на `millis()`. Автоматичний reconnect через `millis()` відновлює з'єднання без `delay()`, з обмеженням у 3 послідовні спроби (Arduino Framework, PlatformIO + Wokwi).
+Публікація реальних показників DHT22 (температура, вологість) у MQTT-топік кожні 10 секунд, і публікація команди `"manual_read"` при натисканні кнопки. Неблокуючий таймер на `millis()`. Автоматичний reconnect через `millis()` відновлює з'єднання без `delay()`: циклами по 3 спроби з паузою 60 с між циклами, і окремо обробляє відсутність Wi-Fi (Arduino Framework, PlatformIO + Wokwi).
 
 ---
 
@@ -43,12 +43,15 @@ lib_deps =
 #define MQTT_PORT      1883                         // plain TCP, без TLS
 #define MQTT_CLIENT_ID "esp32-ozoz03-a"             // унікальний Client ID
 
-#define TOPIC_SENSORS  "iot-course/ozoz03/sensors"   // публікація {temperature, humidity}
-#define TOPIC_COMMANDS "iot-course/ozoz03/commands"  // публікація "manual_read"
+#define TOPIC_SENSOR_TEMP "iot-course/ozoz03/sensors/temperature"  // публікація температури
+#define TOPIC_SENSOR_HUM  "iot-course/ozoz03/sensors/humidity"     // публікація вологості
+#define TOPIC_COMMANDS    "iot-course/ozoz03/commands"             // публікація "manual_read"
+#define TOPIC_STATUS      "iot-course/ozoz03/status/esp32-a"       // online/offline (retained, LWT)
 
 #define PUBLISH_INTERVAL           10000            // інтервал публікації, мс
 #define RECONNECT_INTERVAL         5000             // інтервал між спробами reconnect, мс
 #define MQTT_MAX_RECONNECT_ATTEMPTS 3               // максимум спроб reconnect поспіль
+#define RECONNECT_COOLDOWN         60000            // пауза перед новим циклом спроб, мс
 ```
 
 ---
@@ -74,8 +77,10 @@ bool connectWifi() {
 
 ```cpp
 bool connectMQTT() {
-    if (mqttClient.connect(MQTT_CLIENT_ID)) {
-        // підключено — повертає true
+    // LWT: якщо з'єднання обірветься нештатно, брокер сам опублікує
+    // "offline" (retained) у TOPIC_STATUS
+    if (mqttClient.connect(MQTT_CLIENT_ID, TOPIC_STATUS, 1, true, "offline")) {
+        mqttClient.publish(TOPIC_STATUS, "online", true);  // retained
     }
     // mqttClient.state() — код помилки при невдачі:
     // -4 = таймаут, -2 = сервер не знайдено, 5 = відмовлено в доступі
@@ -86,6 +91,7 @@ bool connectMQTT() {
 - Якщо два клієнти мають однаковий Client ID — перший буде відключений.
 - `setKeepAlive(60)` — ESP32 надсилає PING брокеру кожні 60 секунд.
 - `setSocketTimeout(30)` — таймаут TCP сокету 30 секунд.
+- LWT (`willTopic`/`willMessage`) — брокер сам публікує `"offline"` у `TOPIC_STATUS`, якщо TCP-з'єднання обірветься без штатного `DISCONNECT` (втрата Wi-Fi, живлення тощо). Так підписники бачать, що пристрій відпав, навіть не опитуючи його напряму.
 
 ### 3. Публікація даних сенсорів — `publishSensors()`
 
@@ -93,24 +99,25 @@ bool connectMQTT() {
 void publishSensors() {
     // читає dht.readTemperature() / dht.readHumidity()
     // якщо NaN (сенсор не готовий/помилка) — пропускає публікацію
-    // формує JSON через snprintf() — безпечно для heap (без String)
+    // кожен показник — окремим повідомленням у свій підтопік
     // виконує mqttClient.publish() і виводить результат у Serial
 }
 ```
 
-JSON-тіло повідомлення:
+Payload — просто число, без JSON:
 
-```json
-{"temperature":24.5,"humidity":55.0}
+```
+TOPIC_SENSOR_TEMP → "24.5"
+TOPIC_SENSOR_HUM  → "55.0"
 ```
 
-`snprintf()` замість Arduino `String` — уникаємо фрагментації heap (Заняття 4).
+Окремі підтопіки на кожен показник дозволяють підписатись лише на потрібне значення (наприклад ESP32-B слухає тільки температуру) без розбору JSON. `snprintf()` замість Arduino `String` — уникаємо фрагментації heap (Заняття 4).
 
 ### 4. Ручний запит по кнопці — `publishManualRead()` + `handleButton()`
 
 Кнопка (GPIO5, `INPUT_PULLUP`) опитується з debounce (50 мс), як у ДЗ3. На стабільний перехід у `LOW` публікується рядок `"manual_read"` (не JSON) у `TOPIC_COMMANDS`.
 
-### 5. Неблокуючий таймер і reconnect з лімітом спроб
+### 5. Неблокуючий таймер і reconnect з циклами спроб — `maintainConnection()`
 
 ```cpp
 void loop() {
@@ -124,18 +131,44 @@ void loop() {
         if ((now - lastPublish) > PUBLISH_INTERVAL) {
             publishSensors();
         }
-    } else if (!mqttReconnectExhausted) {
-        if ((now - lastReconnectAttempt) > RECONNECT_INTERVAL) {
-            mqttReconnectAttempts++;
-            if (!connectMQTT() && mqttReconnectAttempts >= MQTT_MAX_RECONNECT_ATTEMPTS) {
-                mqttReconnectExhausted = true;  // більше не намагаємось reconnect
-            }
-        }
+    } else {
+        maintainConnection();
+    }
+}
+
+void maintainConnection() {
+    // цикл вичерпано минулого разу — чекаємо RECONNECT_COOLDOWN, тоді скидаємо
+    // лічильник і стартуємо новий цикл спроб (а не зависаємо офлайн назавжди)
+    if (mqttReconnectExhausted) {
+        if (now - reconnectCooldownStart < RECONNECT_COOLDOWN) return;
+        mqttReconnectAttempts  = 0;
+        mqttReconnectExhausted = false;
+    }
+
+    if ((now - lastReconnectAttempt) <= RECONNECT_INTERVAL) return;
+    lastReconnectAttempt = now;
+
+    // без Wi-Fi спроба MQTT завідомо провалиться — не палимо на це лічильник
+    if (WiFi.status() != WL_CONNECTED) {
+        WiFi.reconnect();  // неблокуючий поштовх
+        return;
+    }
+
+    mqttReconnectAttempts++;
+    if (!connectMQTT() && mqttReconnectAttempts >= MQTT_MAX_RECONNECT_ATTEMPTS) {
+        mqttReconnectExhausted = true;
+        reconnectCooldownStart = now;
     }
 }
 ```
 
-`mqttClient.loop()` викликається тільки коли підключено — без нього брокер не отримує PING і відключає клієнта. Після 3 невдалих спроб поспіль (кожна раз на 5 секунд) пристрій припиняє намагатись reconnect; лічильник і прапорець `mqttReconnectExhausted` скидаються одразу після успішного підключення.
+`mqttClient.loop()` викликається тільки коли підключено — без нього брокер не отримує PING і відключає клієнта.
+
+`maintainConnection()` розділяє дві причини відсутності з'єднання:
+- **Немає Wi-Fi** — спроба MQTT тут завідомо марна, тож лічильник спроб не витрачається: замість цього неблокуюче `WiFi.reconnect()`.
+- **Wi-Fi є, брокер не відповідає** — це і є "справжня" спроба reconnect, вона враховується в лічильнику.
+
+Після `MQTT_MAX_RECONNECT_ATTEMPTS` невдалих спроб поспіль пристрій не зависає офлайн назавжди: чекає паузу `RECONNECT_COOLDOWN` (60 с), скидає лічильник і починає новий цикл спроб. Той самий лічильник і прапорець `mqttReconnectExhausted` також скидаються одразу після успішного підключення. У `setup()` результат `connectWifi()` перевіряється — якщо Wi-Fi одразу не піднявся, `connectMQTT()` там навіть не викликається (сенсу немає), і `maintainConnection()` бере це на себе з першої ж ітерації `loop()`.
 
 ---
 
@@ -146,13 +179,13 @@ ESP32-A старт
 [Wi-Fi] Підключаємось.... OK
 [Wi-Fi] IP: 10.13.37.2
 [MQTT] Підключаємось до broker.hivemq.com... OK
-[MQTT] Публікуємо: {"temperature":27.0,"humidity":55.0}
+[MQTT] Публікуємо temperature=27.0 humidity=55.0
 [MQTT] OK
 [MQTT] Публікуємо команду: manual_read
 [MQTT] OK
 ```
 
-При втраті з'єднання (максимум 3 спроби, потім пауза до наступного успішного `mqttClient.loop()`):
+При втраті з'єднання (Wi-Fi є, брокер не відповідає — максимум 3 спроби, потім пауза 60 с і новий цикл):
 
 ```
 [MQTT] З'єднання втрачено — спроба 1/3
@@ -161,7 +194,17 @@ ESP32-A старт
 [MQTT] Підключаємось до broker.hivemq.com... помилка: -2
 [MQTT] З'єднання втрачено — спроба 3/3
 [MQTT] Підключаємось до broker.hivemq.com... помилка: -2
-[MQTT] Досягнуто максимум спроб reconnect — припиняємо, поки Wi-Fi/брокер не відновляться
+[MQTT] Досягнуто максимум спроб reconnect — пауза 60с перед новим циклом
+... (60 секунд тиші) ...
+[MQTT] Пауза закінчилась — починаємо новий цикл спроб reconnect
+[MQTT] З'єднання втрачено — спроба 1/3
+```
+
+Якщо ж пропав саме Wi-Fi — лічильник спроб не витрачається, натомість неблокуючий `WiFi.reconnect()` раз на 5 с:
+
+```
+[Wi-Fi] З'єднання втрачено — перепідключаємось...
+[Wi-Fi] З'єднання втрачено — перепідключаємось...
 ```
 
 ---
@@ -171,7 +214,7 @@ ESP32-A старт
 1. Відкрити `hivemq.com/demos/websocket-client`
 2. Host: `broker.hivemq.com`, Port: `8884`
 3. Натиснути **Connect** (зелена крапка = підключено)
-4. **Add New Topic Subscription** → топік: `iot-course/demo/#`
+4. **Add New Topic Subscription** → топік: `iot-course/ozoz03/#`
 5. Запустити симуляцію в Wokwi — повідомлення з'являться в секції **Messages**
 
 ---
