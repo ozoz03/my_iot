@@ -29,12 +29,22 @@
 unsigned long lastReconnectAttempt = 0;
 #define RECONNECT_INTERVAL 5000  // мс
 
+// Чи вдалась остання синхронізація часу — якщо ні, TLS-handshake завжди
+// падатиме (state -2), тому перед кожною спробою MQTT-перепідключення
+// синхронізацію часу треба повторити, а не лише сам connectMQTT()
+bool timeOk = false;
+
 // ═══════════════════════════════════════════════════════════
 // ТАЙМІНГИ
 // ═══════════════════════════════════════════════════════════
 #define DEBOUNCE_DELAY   50     // мс
 #define MONITOR_INTERVAL 5000   // мс — читання сенсорів у режимі "моніторинг"
 #define PUBLISH_INTERVAL 30000  // мс — публікація в AWS IoT Core
+
+// Якщо останнє вдале вимірювання DHT22 старіше за це — дані вважаються
+// застарілими (сенсор мовчить), publishData() їх не публікує, щоб не
+// видавати старі temperature/humidity за свіжий вимір з новим timestamp
+#define STALE_THRESHOLD (PUBLISH_INTERVAL * 3)
 
 // Поріг освітленості (люкси), нижче якого вмикається LED.
 // Значення підібране під дефолтну яскравість LDR-слайдера у Wokwi;
@@ -61,10 +71,11 @@ struct SensorData {
   float temperature;
   float humidity;
   float lux;
-  bool  hasData;  // true лише після першого реального вимірювання
+  bool  hasData;             // true лише після першого реального вимірювання
+  unsigned long lastGoodMillis;  // millis() останнього вдалого читання DHT22
 };
 
-SensorData lastGoodData = { 0.0f, 0.0f, 0.0f, false };
+SensorData lastGoodData = { 0.0f, 0.0f, 0.0f, false, 0 };
 
 DHT dht(DHTT_PIN, DHTT_TYPE);
 
@@ -176,7 +187,7 @@ void connectAWS() {
     connectWifi();
 
     // 2. синхронізуємо час — до сертифікатів, до connect()
-    syncTime();
+    timeOk = syncTime();
 
     // 3. заряджаємо три файли з secrets.h у TLS-клієнт
     net.setCACert(AWS_CERT_CA);
@@ -217,9 +228,11 @@ bool connectMQTT() {
 }
 
 // ═══════════════════════════════════════════════════════════
-// ЗЧИТУВАННЯ СЕНСОРІВ + КЕРУВАННЯ LED (лише в режимі "моніторинг")
+// ЗЧИТУВАННЯ СЕНСОРІВ — завжди, незалежно від режиму
+// (публікація в хмару не повинна залежати від режиму відображення).
+// Режим лише вмикає/вимикає Serial-вивід і поведінку LED нижче.
 // ═══════════════════════════════════════════════════════════
-void readAndPrintSensors() {
+void readSensors() {
   int   rawLdr = analogRead(LDR_PIN);
   float lux    = adcToLux(rawLdr);
 
@@ -227,14 +240,20 @@ void readAndPrintSensors() {
   float humidity    = dht.readHumidity();
   bool  dhtOk        = !isnan(temperature) && !isnan(humidity);
 
-  if (!dhtOk) {
+  if (!dhtOk && currentMode == MODE_MONITORING) {
     Serial.println("[Помилка] DHT22: сенсор повернув некоректні дані (NaN) — пропускаємо, продовжуємо роботу");
-  } else {
-    lastGoodData.temperature = temperature;
-    lastGoodData.humidity    = humidity;
+  }
+  if (dhtOk) {
+    lastGoodData.temperature   = temperature;
+    lastGoodData.humidity      = humidity;
+    lastGoodData.lastGoodMillis = millis();
   }
   lastGoodData.lux = lux;
   lastGoodData.hasData = true;
+
+  if (currentMode != MODE_MONITORING) {
+    return;
+  }
 
   char tempStr[8];
   char humStr[8];
@@ -267,6 +286,11 @@ void readAndPrintSensors() {
 void publishData(const SensorData &data) {
     if (!data.hasData) {
         Serial.println("[MQTT] Ще немає жодного вимірювання — пропускаємо публікацію");
+        return;
+    }
+
+    if (millis() - data.lastGoodMillis > STALE_THRESHOLD) {
+        Serial.println("[MQTT] Дані застарілі (DHT22 мовчить) — пропускаємо публікацію");
         return;
     }
 
@@ -321,9 +345,9 @@ void loop() {
 
     handleButton();
 
-    if (currentMode == MODE_MONITORING && (now - lastMonitor) >= MONITOR_INTERVAL) {
+    if ((now - lastMonitor) >= MONITOR_INTERVAL) {
         lastMonitor = now;
-        readAndPrintSensors();
+        readSensors();
     }
 
     if (mqttClient.connected()) {
@@ -338,9 +362,24 @@ void loop() {
             lastReconnectAttempt = now;
             Serial.println("[MQTT] З'єднання втрачено — перепідключаємось...");
 
+            // Wi-Fi міг відвалитись незалежно від MQTT (на відміну від часу,
+            // тут не потрібен окремий прапорець — WiFi.status() завжди дає
+            // актуальний стан, кешований bool міг би так само застаріти,
+            // як застарів timeOk без цього фікса)
+            if (WiFi.status() != WL_CONNECTED) {
+                connectWifi();
+            }
+
             // Явно закриваємо стару TLS-сесію перед новою спробою —
             // інакше mbedTLS-контекст може лишитись "напівживим"
             net.stop();
+
+            // Час міг не синхронізуватись при старті (UDP/123 не пройшов) —
+            // без цього TLS-handshake завжди падатиме з state -2,
+            // а сам connectMQTT() час повторно не синхронізує
+            if (!timeOk) {
+                timeOk = syncTime();
+            }
 
             connectMQTT();
         }
