@@ -148,6 +148,12 @@ bool connectWifi() {
     Serial.println(" OK");
     Serial.print("[Wi-Fi] IP: ");
     Serial.println(WiFi.localIP());
+
+    // DHCP у Wokwi іноді не віддає робочий DNS-сервер — тоді hostByName()
+    // падає з "DNS Failed" ще до TLS, навіть коли Wi-Fi і IP вже є.
+    // Прописуємо публічний DNS явно, лишаючи вже отримані IP/gateway/subnet.
+    WiFi.config(WiFi.localIP(), WiFi.gatewayIP(), WiFi.subnetMask(), IPAddress(8, 8, 8, 8), IPAddress(1, 1, 1, 1));
+
     return true;
 }
 

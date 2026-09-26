@@ -50,7 +50,7 @@
 |---|---|
 | Регіон | `eu-north-1` |
 | Таблиця DynamoDB | `iot_telemetry` (створена на Занятті 11) |
-| `device_id` | `esp32lecture10` |
+| `device_id` | `esp32-zasymenko` |
 | Топік команд | `iot-course/demo/commands/led` |
 | Топік телеметрії | `iot-course/demo/telemetry` |
 | Порт API | `8000` (uvicorn за замовчуванням) |
@@ -86,7 +86,7 @@ requirements.txt  — залежності Python
 | `AWS_SECRET_ACCESS_KEY` | секретна частина ключа |
 | `AWS_DEFAULT_REGION` | регіон — `eu-north-1` (звідси його бере і DynamoDB, і IoT) |
 | `TABLE_NAME` | `iot_telemetry` |
-| `DEVICE_ID` | `esp32lecture10` — partition key, за яким робимо query |
+| `DEVICE_ID` | `esp32-zasymenko` — partition key, за яким робимо query |
 
 **Дозволи IAM.** До `dynamodb:Query` із Заняття 12 тепер додається
 `iot:Publish` на ARN топіка команд:
