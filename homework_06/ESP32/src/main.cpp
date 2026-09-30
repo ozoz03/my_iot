@@ -3,6 +3,7 @@
 #include <WiFiClientSecure.h>
 #include <PubSubClient.h>
 #include "DHT.h"
+#include "esp_sntp.h"
 #include "secrets.h"
 
 // ═══════════════════════════════════════════════════════════
@@ -165,8 +166,15 @@ bool connectWifi() {
 // ═══════════════════════════════════════════════════════════
 #define NTP_TIMEOUT 15000  // мс
 
+// Як часто SNTP сам перезвіряє годинник з сервером (за замовчуванням — 1 год).
+// У Wokwi віртуальний годинник ESP32 зупиняється, коли симуляція на паузі
+// (Mac заснув, вкладка/панель неактивна), і після відновлення timestamp
+// "застрягає" в минулому аж до наступної синхронізації
+#define NTP_RESYNC_INTERVAL (5 * 60 * 1000UL)  // мс
+
 bool syncTime() {
     Serial.print("[NTP] Синхронізація часу");
+    sntp_set_sync_interval(NTP_RESYNC_INTERVAL);
     configTime(0, 0, "pool.ntp.org");  // зсув 0, DST 0 — для TLS достатньо
 
     struct tm timeinfo;
