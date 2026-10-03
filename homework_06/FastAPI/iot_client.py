@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-TOPIC_CMD = "iot-course/demo/commands/led"
+TOPIC_CMD = "iot-course/ozasymenko/commands/led"
 
 # Регіон boto3 сам візьме з AWS_DEFAULT_REGION
 iot = boto3.client("iot-data")

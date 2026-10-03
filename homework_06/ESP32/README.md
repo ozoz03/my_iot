@@ -51,12 +51,19 @@
 
 Policy прикріплена до X.509-сертифіката пристрою, а сертифікат — до Thing `esp32-zasymenko`.
 
-`iot:Connect` прив'язаний до `${iot:Connection.Thing.ThingName}` (резолвиться AWS-ом із прив'язки сертифіката до Thing, з пристрою підробити неможливо) з умовою `iot:Connection.Thing.IsAttached`, а не до `${iot:ClientId}` (це значення пристрій передає сам у CONNECT, тому його можна підмінити). `iot:Publish` дозволений лише на конкретний топік телеметрії; пристрій нічого не підписує, тому `iot:Subscribe`/`iot:Receive` у Policy немає.
+`iot:Connect` прив'язаний до `${iot:Connection.Thing.ThingName}` (резолвиться AWS-ом із прив'язки сертифіката до Thing, з пристрою підробити неможливо) з умовою `iot:Connection.Thing.IsAttached`, а не до `${iot:ClientId}` (це значення пристрій передає сам у CONNECT, тому його можна підмінити).
+
+Відколи пристрій почав ще й слухати команди (двостороння комунікація, Заняття 14), у Policy додались `iot:Subscribe`/`iot:Receive` на топік команд — зверни увагу, що це **різні типи ARN**: `Subscribe` діє на `topicfilter/...` (сам фільтр підписки), а `Receive` — вже на конкретний `topic/...` (фактичне повідомлення). `iot:Publish` звужено до одного простору топіків пристрою (`ozasymenko/*`) замість точного `sensors/data`, щоб покривати заразом і телеметрію, і майбутні підтопіки без переприв'язки Policy.
 
 ```json
 {
   "Version": "2012-10-17",
   "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": "iot:Publish",
+      "Resource": "arn:aws:iot:eu-north-1:<ACCOUNT_ID>:topic/iot-course/ozasymenko/*"
+    },
     {
       "Effect": "Allow",
       "Action": "iot:Connect",
@@ -67,8 +74,13 @@ Policy прикріплена до X.509-сертифіката пристрою
     },
     {
       "Effect": "Allow",
-      "Action": "iot:Publish",
-      "Resource": "arn:aws:iot:eu-north-1:<ACCOUNT_ID>:topic/iot-course/ozasymenko/sensors/data"
+      "Action": "iot:Subscribe",
+      "Resource": "arn:aws:iot:eu-north-1:<ACCOUNT_ID>:topicfilter/iot-course/ozasymenko/commands/*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": "iot:Receive",
+      "Resource": "arn:aws:iot:eu-north-1:<ACCOUNT_ID>:topic/iot-course/ozasymenko/commands/*"
     }
   ]
 }

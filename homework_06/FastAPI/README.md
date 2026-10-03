@@ -24,7 +24,7 @@
 └───┬───────────┬───┘        POST /actuators/led
     │           │
     │ boto3     │ boto3 iot-data.publish (QoS 1)
-    │ query     │ topic: iot-course/demo/commands/led
+    │ query     │ topic: iot-course/ozasymenko/commands/led
     ▼           ▼
 ┌──────────┐  ┌──────────────────┐
 │ DynamoDB │  │  AWS IoT Core    │
@@ -34,7 +34,7 @@
      │            ┌──────────┐
      │ Rules      │  ESP32   │ → LED
      │ Engine     └────┬─────┘
-     └─────────────────┘  topic: iot-course/demo/telemetry
+     └─────────────────┘  topic: iot-course/ozasymenko/sensors/data
 ```
 
 **Два незалежні канали.** «Вгору» — пристрій публікує телеметрію, правило кладе
@@ -51,8 +51,8 @@
 | Регіон | `eu-north-1` |
 | Таблиця DynamoDB | `iot_telemetry` (створена на Занятті 11) |
 | `device_id` | `esp32-zasymenko` |
-| Топік команд | `iot-course/demo/commands/led` |
-| Топік телеметрії | `iot-course/demo/telemetry` |
+| Топік команд | `iot-course/ozasymenko/commands/led` |
+| Топік телеметрії | `iot-course/ozasymenko/sensors/data` |
 | Порт API | `8000` (uvicorn за замовчуванням) |
 
 ---
@@ -89,14 +89,32 @@ requirements.txt  — залежності Python
 | `DEVICE_ID` | `esp32-zasymenko` — partition key, за яким робимо query |
 
 **Дозволи IAM.** До `dynamodb:Query` із Заняття 12 тепер додається
-`iot:Publish` на ARN топіка команд:
+`iot:Publish` на топік команд. Реальна managed-політика IAM-користувача:
 
-```
-arn:aws:iot:eu-north-1:<account-id>:topic/iot-course/demo/commands/led
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadTelemetry",
+      "Effect": "Allow",
+      "Action": "dynamodb:Query",
+      "Resource": "arn:aws:dynamodb:eu-north-1:<ACCOUNT_ID>:table/iot_telemetry"
+    },
+    {
+      "Effect": "Allow",
+      "Action": "iot:Publish",
+      "Resource": "arn:aws:iot:eu-north-1:<ACCOUNT_ID>:topic/iot-course/ozasymenko/commands/*"
+    }
+  ]
+}
 ```
 
-Принцип найменших привілеїв той самий, що на Заняттях 9 і 11: два дозволи на
-два конкретні ресурси. Не `AdministratorAccess` «щоб працювало».
+`commands/*` — навмисна маска замість точного `commands/led`, щоб не
+переприв'язувати політику при появі нового актуатора (`commands/fan` тощо)
+в тому самому просторі топіків. Принцип найменших привілеїв той самий, що
+на Заняттях 9 і 11: дозволи звужені до конкретної таблиці й топіка. Не
+`AdministratorAccess` «щоб працювало».
 
 > `load_dotenv()` у `main.py` викликається **до** `import db` — бо `db.py`
 > читає змінні середовища прямо при імпорті. Поміняєте порядок — отримаєте
@@ -231,7 +249,7 @@ app.add_middleware(
 1. **API живий** — `GET /health` у `/docs`.
 2. **Команда доходить до AWS** — натиснути кнопку, дивитись відповідь `202`.
 3. **Команда в топіку** — AWS IoT Console → MQTT test client → підписатись на
-   `iot-course/demo/commands/led`. Побачили JSON — бекенд свою роботу зробив.
+   `iot-course/ozasymenko/commands/led`. Побачили JSON — бекенд свою роботу зробив.
 4. **Пристрій отримав** — Serial Monitor у Wokwi: `[CMD] Отримано: ...`.
 5. **Світлодіод** — власне LED на D2 у симуляторі.
 

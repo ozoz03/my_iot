@@ -24,7 +24,7 @@
 ┌──────────────────────────────┐
 │  FastAPI  :8000              │  202 Accepted
 └──────────────┬───────────────┘
-               │ publish → topic: iot-course/demo/commands/led
+               │ publish → topic: iot-course/ozasymenko/commands/led
                ▼
         AWS IoT Core  →  ESP32  →  LED
 ```
