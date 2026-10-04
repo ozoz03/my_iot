@@ -11,34 +11,35 @@
 ## Архітектура (обидва напрямки)
 
 ```
-                 ВГОРУ: телеметрія                      ВНИЗ: команда
-┌──────────────┐  MQTT/TLS                    ┌──────────────┐  fetch POST
-│  ESP32       │  topic:                      │  Браузер     │  {"value":"on"}
-│  (DHT22+LDR) │  iot-course/ozasymenko/       │  index.html  │
-└──────┬───────┘  sensors/data                 └──────┬───────┘
-       │ publish                                      │ POST /actuators/led
-       ▼                                               ▼
-┌──────────────────────────────┐              ┌───────────────────┐
-│  AWS IoT Core (eu-north-1)   │              │  FastAPI :8000    │
-│  Rules Engine → DynamoDB     │              └─────────┬─────────┘
-└──────┬────────────────────────┘                        │ boto3
-       │ dynamoDBv2 (роль iot_write_db)                   │ iot-data.publish
-       ▼                                                  ▼
-┌──────────────┐                              ┌──────────────────────────┐
-│  DynamoDB    │ ◄──── boto3 query ───────────│  AWS IoT Core             │
-│ iot_telemetry│       GET /sensors/latest     │  topic:                  │
-└──────────────┘       GET /sensors/history    │  iot-course/ozasymenko/  │
-                                                │  commands/led            │
-                                                └──────────┬───────────────┘
-                                                           │ subscribe
-                                                           ▼
-                                                    ┌──────────────┐
-                                                    │  ESP32 → LED │
-                                                    └──────┬───────┘
-                                                           │ publish ack
-                                                           │ topic: .../commands/led/ack
-                                                           ▼
-                                                    AWS IoT Core (назад)
+┌─────────────────┐
+│  Браузер        │  HTML/index.html
+│  [Увімкнути]    │
+└────────┬────────┘
+         │ POST /actuators/led  {"value":"on"}
+         │ HTTP + CORS
+         ▼
+┌─────────────────────────────────────────┐
+│  FastAPI  :8000                         │  ← GET /sensors/latest
+│  main.py · iot_client.py · db.py        │  ← GET /sensors/history
+└────────┬───────────────────────▲────────┘
+         │ boto3 iot-data        │ boto3 query
+         │ publish  QoS 1        │
+         ▼                       │
+┌─────────────────┐     ┌────────┴────────┐
+│  AWS IoT Core   │     │  DynamoDB       │
+│                 │     │  iot_telemetry  │
+└────────┬────────┘     └────────▲────────┘
+         │                       │
+         │ topic:                │ Rules Engine
+         │ .../commands/led      │ 
+         │                       │
+         │ MQTT over TLS :8883   │ topic: .../telemetry
+         ▼                       │
+┌────────────────────────────────┴───────┐
+│  ESP32 (Wokwi)                         │
+│  subscribe → LED D2  publish → 10 сек  │
+└────────────────────────────────────────┘
+
 ```
 
 Два незалежні канали: «вгору» (телеметрія: пристрій → Rule → DynamoDB →
@@ -47,7 +48,7 @@ FastAPI → браузер) і «вниз» (команда: браузер → 
 топіка/таблиці, а не IP чи URL.
 
 Третій, окремий споживач «вгору»-каналу — **Grafana**: вона не читає
-DynamoDB/AWS напряму, а б'є в ті самі `GET /sensors/latest` і
+DynamoDB/AWS напряму, а через ті самі `GET /sensors/latest` і
 `GET /sensors/history` FastAPI, що й міг би будь-який інший клієнт. Деталі —
 нижче.
 
@@ -76,7 +77,6 @@ grafana/   — dashboard.json для імпорту в Grafana
 | CloudWatch Log Groups | `iot_db_store_errors`, `temperatureLogGroup` | помилки Rule / температурні події |
 | IAM-користувач (FastAPI, `.env`) | `dynamodb:Query` на `table/iot_telemetry` + `iot:Publish` на `topic/iot-course/ozasymenko/commands/*` | читання телеметрії й публікація команд із бекенда |
 | MQTT топік команд | `iot-course/ozasymenko/commands/led` | FastAPI публікує, ESP32 підписується |
-| MQTT топік ack | `iot-course/ozasymenko/commands/led/ack` | ESP32 публікує після виконання команди, підтверджуючи результат |
 
 ---
 
@@ -88,8 +88,10 @@ grafana/   — dashboard.json для імпорту в Grafana
 cd ESP32
 cp src/secrets.example.h src/secrets.h   # заповнити своїми значеннями
 # залити сертифікати, THINGNAME, AWS_IOT_ENDPOINT
-pio run                                   # або Wokwi: Run
+pio run                                   
 ```
+Запустити Wokwi симулятор
+
 
 ### FastAPI (:8000)
 
@@ -103,15 +105,9 @@ uvicorn main:app --reload
 
 Swagger UI: http://127.0.0.1:8000/docs
 
-### HTML
-
-Відкрити `HTML/index.html` подвійним кліком — бʼє в `http://localhost:8000`.
-
 ### Grafana
 
 ![Grafana dashboard](ESP32/images/grafana.png)
-
-[Демонстрація роботи (запис екрана)](<ESP32/images/Screen Recording 2026-10-03 at 23.08.35.mov>)
 
 Дашборд читає JSON напряму з FastAPI — без окремого проміжного API чи БД
 на боці Grafana.
@@ -139,19 +135,24 @@ Swagger UI: http://127.0.0.1:8000/docs
 
 ---
 
-## Підтвердження виконання команди
 
-ESP32 (`led.cpp`) після виконання команди публікує ack назад у хмару — на
-`iot-course/ozasymenko/commands/led/ack`, окремий від топіка команд, яким
-пристрій тільки слухає:
+### HTML
+
+Відкрити `HTML/index.html`, що звертається до backend-у на `http://localhost:8000`.
+Натискаємо внопку "Увімкнути".
+
+ESP32 (`led.cpp`) після виконання команди виводить:
+```
+"[CMD] LED увімкнено"
+```
+На html сторінці виводиться payload відповіді:
 
 ```json
 {"value":"on","status":"ok"}
 ```
 
-Доказ: AWS IoT Console → MQTT test client → підписатись на
-`iot-course/ozasymenko/commands/led/ack`. Натиснути кнопку в браузері —
-побачити в тест-клієнті спершу команду на `.../commands/led`, тоді ack на
-`.../commands/led/ack`. `202 Accepted` від FastAPI підтверджує лише доставку
-до брокера; ack у цьому топіку підтверджує, що світлодіод справді змінив
-стан.
+Cвітлодіод змінив стан на ввімкнутий.
+
+Аналогічно з вимиканням світодіоду.
+
+[Демонстрація роботи (запис екрана)](<ESP32/images/Screen Recording 2026-10-03 at 23.08.35.mov>)
