@@ -1,7 +1,8 @@
 #pragma once
 
-// Топік, на який ESP32 публікує підтвердження виконання LED-команди —
-// окремий від топіка команд (mqtt.cpp), яким пристрій лише слухає.
-// Вже покритий тим самим Publish-дозволом у IoT Policy, що й телеметрія
+// Топік подій пристрою — спільний простір для різних типів подій
+// ("led_changed" сьогодні, інші завтра), а не окремий ack-підтопік під
+// командами. Тип події несе поле "event" у payload, а не назва топіка.
+// Уже покритий тим самим Publish-дозволом у IoT Policy, що й телеметрія
 // (wildcard "iot-course/ozasymenko/*").
-#define TOPIC_LED_ACK "iot-course/ozasymenko/commands/led/ack"
+#define TOPIC_EVENTS "iot-course/ozasymenko/events"

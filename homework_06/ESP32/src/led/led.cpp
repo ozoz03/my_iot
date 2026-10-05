@@ -17,12 +17,12 @@ void led_handle_command(const char* cmd) {
     if (strstr(cmd, "\"on\"") != NULL) {
         digitalWrite(LED_PIN, HIGH);
         Serial.println("[CMD] LED увімкнено");
-        mqtt_publish(TOPIC_LED_ACK, "{\"value\":\"on\",\"status\":\"ok\"}");
+        mqtt_publish(TOPIC_EVENTS, "{\"event\":\"led_changed\",\"value\":\"on\"}");
 
     } else if (strstr(cmd, "\"off\"") != NULL) {
         digitalWrite(LED_PIN, LOW);
         Serial.println("[CMD] LED вимкнено");
-        mqtt_publish(TOPIC_LED_ACK, "{\"value\":\"off\",\"status\":\"ok\"}");
+        mqtt_publish(TOPIC_EVENTS, "{\"event\":\"led_changed\",\"value\":\"off\"}");
 
     } else {
         Serial.println("[CMD] Невідома команда — ігноруємо");

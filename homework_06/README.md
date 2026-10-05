@@ -77,7 +77,7 @@ grafana/   — dashboard.json для імпорту в Grafana
 | CloudWatch Log Groups | `iot_db_store_errors`, `temperatureLogGroup`, `iot-command-group` | помилки Rule / температурні події / лог усіх команд |
 | IAM-користувач (FastAPI, `.env`) | `dynamodb:Query` на `table/iot_telemetry` + `iot:Publish` на `topic/iot-course/ozasymenko/commands/*` | читання телеметрії й публікація команд із бекенда |
 | MQTT топік команд | `iot-course/ozasymenko/commands/led` | FastAPI публікує, ESP32 підписується |
-| MQTT топік ack | `iot-course/ozasymenko/commands/led/ack` | ESP32 публікує після виконання команди, підтверджуючи результат |
+| MQTT топік подій | `iot-course/ozasymenko/events` | ESP32 публікує після виконання команди (`{"event":"led_changed",...}`), підтверджуючи результат |
 
 ---
 
@@ -154,25 +154,28 @@ MQTT не бачить):
 світлодіод реально загорівся.
 
 ESP32 (`led.cpp`) отримує команду, вмикає світлодіод і одразу публікує
-підтвердження назад у хмару — на окремий топік
-**`iot-course/ozasymenko/commands/led/ack`**:
+подію назад у хмару — на спільний топік подій пристрою
+**`iot-course/ozasymenko/events`**:
 
 ```
 Serial: "[CMD] LED увімкнено"
-MQTT → iot-course/ozasymenko/commands/led/ack:
-{"value":"on","status":"ok"}
+MQTT → iot-course/ozasymenko/events:
+{"event":"led_changed","value":"on"}
 ```
 
-Побачити цей ack можна в AWS IoT Console → MQTT test client, підписавшись
-на `iot-course/ozasymenko/commands/led/ack` — саме ця подія, а не `202` від
-FastAPI, і є доказом, що світлодіод реально змінив стан.
+Топік спільний для різних типів подій (не лише LED) — тип несе поле
+`event` у payload, а не назва топіка чи окремий підтопік під командами.
+
+Побачити цю подію можна в AWS IoT Console → MQTT test client, підписавшись
+на `iot-course/ozasymenko/events` — саме вона, а не `202` від FastAPI, і є
+доказом, що світлодіод реально змінив стан.
 
 ---
 
 ## Лог команд (CloudWatch)
 
 Окреме Rule `LogCommand` слухає топік команд і пише кожну вхідну команду в
-CloudWatch Logs — незалежний від Serial Monitor і ack-топіка аудит того,
+CloudWatch Logs — незалежний від Serial Monitor і топіка подій аудит того,
 що саме й коли було надіслано пристрою.
 
 ### CommndLogRule
