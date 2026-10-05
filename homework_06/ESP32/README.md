@@ -41,6 +41,22 @@
                
          
 ```
+
+### SQL правила StoreTelemetry
+
+Схема вище спрощує запис до `SELECT * + timestamp() + clientid() + topic(2)`
+— точний текст правила, яке реально кладе телеметрію в DynamoDB:
+
+```sql
+SELECT *, timestamp() as received_at, clientid() as client_id, topic(2) as student
+FROM 'iot-course/ozasymenko/sensors/data'
+```
+
+`received_at` — sort key таблиці `iot_telemetry`, саме за ним `FastAPI/db.py`
+робить query. На `images/Store.png` видно `timestamp() as created_at` — це
+застарілий стан з попереднього завдання; описаний тут SQL відповідає тому,
+що реально налаштовано зараз.
+
 ## Thing
 
 ![Thing](./images/Thing.png)

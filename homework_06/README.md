@@ -79,6 +79,14 @@ grafana/   — dashboard.json для імпорту в Grafana
 | MQTT топік команд | `iot-course/ozasymenko/commands/led` | FastAPI публікує, ESP32 підписується |
 | MQTT топік подій | `iot-course/ozasymenko/events` | ESP32 публікує після виконання команди (`{"event":"led_changed",...}`), підтверджуючи результат |
 
+**SQL правила `StoreTelemetry`** (кладе телеметрію в DynamoDB — саме звідси
+`received_at`, за яким `db.py` робить query):
+
+```sql
+SELECT *, timestamp() as received_at, clientid() as client_id, topic(2) as student
+FROM 'iot-course/ozasymenko/sensors/data'
+```
+
 ---
 
 ## Як запустити
