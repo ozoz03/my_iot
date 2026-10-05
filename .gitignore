@@ -72,3 +72,5 @@ Testing/
 .env
 .venv
 __pycache__
+
+src/secrets.h
