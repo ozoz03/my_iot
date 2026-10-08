@@ -11,6 +11,8 @@
 ## Архітектура (обидва напрямки)
 
 ```
+        ↓ КОМАНДИ (вниз)                ↑ ТЕЛЕМЕТРІЯ (вгору)
+
 ┌─────────────────┐
 │  Браузер        │  HTML/index.html
 │  [Увімкнути]    │
@@ -20,37 +22,35 @@
          ▼
 ┌─────────────────────────────────────────┐
 │  FastAPI  :8000                         │  ← GET /sensors/latest
-│  main.py · iot_client.py · db.py        │  ← GET /sensors/history
-└────────┬───────────────────────▲────────┘
-         │ boto3 iot-data        │ boto3 query
-         │ publish  QoS 1        │
+│  main.py · iot_client.py · db.py        │<--┌─────────────────┐
+└────────┬───────────────────────▲────────┘   │  Grafana        │ 
+         │ boto3 iot-data        │boto3 query │  [infinity]     │
+         │ publish  QoS 1        │            └─────────────────┘
          ▼                       │
 ┌─────────────────┐     ┌────────┴────────┐
 │  AWS IoT Core   │     │  DynamoDB       │
 │                 │     │  iot_telemetry  │
-└────────┬────────┘     └────────▲────────┘
-         │                       │
-         │ topic:                │ Rules Engine
-         │ .../commands/led      │ 
-         │                       │
-         │ MQTT over TLS :8883   │ topic: .../telemetry
-         ▼                       │
+└──────▲─┬────────┘     └────────▲────────┘
+       │ │                       │
+topic: │ │ topic:                │ Rules Engine
+/events│ │ .../commands/led      │ (Заняття 11)
+       │ │                       │
+       │ │ MQTT over TLS :8883   │ topic: .../sensors/data
+       │ ▼                       │
 ┌────────────────────────────────┴───────┐
 │  ESP32 (Wokwi)                         │
-│  subscribe → LED D2  publish → 10 сек  │
+│  subscribe → LED D2   publish → 30 сек │
 └────────────────────────────────────────┘
-
 ```
 
 Два незалежні канали: «вгору» (телеметрія: пристрій → Rule → DynamoDB →
-FastAPI → браузер) і «вниз» (команда: браузер → FastAPI → AWS IoT →
-пристрій). Жодна частина не знає адреси іншої — спільна точка це назва
-топіка/таблиці, а не IP чи URL.
+FastAPI → браузер/Grafana) і «вниз» (команда: браузер → FastAPI → AWS IoT →
+пристрій → подія назад). Жодна частина не знає адреси іншої — спільна точка
+це назва топіка/таблиці, а не IP чи URL.
 
-Третій, окремий споживач «вгору»-каналу — **Grafana**: вона не читає
+Grafana — третій, окремий споживач «вгору»-каналу: вона не читає
 DynamoDB/AWS напряму, а через ті самі `GET /sensors/latest` і
-`GET /sensors/history` FastAPI, що й міг би будь-який інший клієнт. Деталі —
-нижче.
+`GET /sensors/history`, що й міг би будь-який інший клієнт.
 
 ---
 
@@ -120,6 +120,14 @@ Swagger UI: http://127.0.0.1:8000/docs
 
 Дашборд читає JSON напряму з FastAPI — без окремого проміжного API чи БД
 на боці Grafana.
+
+**Запуск (macOS):**
+
+```bash
+brew install grafana
+brew services start grafana
+# відкрити http://localhost:3000, логін admin / admin
+```
 
 1. Встановити плагін **Infinity** (`yesoreyeram-infinity-datasource`):
    `grafana-cli plugins install yesoreyeram-infinity-datasource` (або через

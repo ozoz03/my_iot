@@ -23,6 +23,7 @@
   "panels": [
     {
       "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
         "uid": "ffzqbcngxds00d"
       },
       "fieldConfig": {
