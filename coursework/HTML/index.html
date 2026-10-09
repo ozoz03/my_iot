@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ESP32 LED</title>
+<style>
+  :root {
+    --bg: #101215;
+    --fg: #e8eaed;
+    --muted: #8a9199;
+    --line: #2a2f36;
+    --accent: #2f81f7;
+    --mono: ui-monospace, "Cascadia Mono", "Consolas", monospace;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 40px;
+    padding: 40px;
+    background: var(--bg);
+    color: var(--fg);
+    font: 20px/1.5 system-ui, sans-serif;
+  }
+
+  .endpoint {
+    font-family: var(--mono);
+    font-size: 18px;
+    color: var(--muted);
+  }
+
+  .buttons { display: flex; gap: 32px; flex-wrap: wrap; justify-content: center; }
+
+  button {
+    min-width: 300px;
+    padding: 28px 40px;
+    font: 600 32px/1 system-ui, sans-serif;
+    color: var(--fg);
+    background: #1b1f25;
+    border: 2px solid var(--line);
+    border-radius: 8px;
+    cursor: pointer;
+    transition: background .15s, border-color .15s, opacity .15s;
+  }
+
+  button.accent { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:hover:not(:disabled) { border-color: var(--fg); }
+  button.accent:hover:not(:disabled) { background: #4b95fa; border-color: #4b95fa; }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+
+  #result {
+    width: 100%;
+    max-width: 664px;
+    min-height: 140px;
+    padding: 24px;
+    border: 2px solid var(--line);
+    border-radius: 8px;
+    font-family: var(--mono);
+    font-size: 20px;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  #result .label { color: var(--muted); font-family: system-ui, sans-serif; }
+  #result .error { color: #f0836b; }
+</style>
+</head>
+<body>
+
+<div class="endpoint">POST http://localhost:8000/actuators/led</div>
+
+<div class="buttons">
+  <button id="on" class="accent">Увімкнути</button>
+  <button id="off">Вимкнути</button>
+</div>
+
+<div id="result"><span class="label">Команду ще не надсилали</span></div>
+
+<script>
+const buttons = document.querySelectorAll('button');
+const result = document.getElementById('result');
+
+async function send(value) {
+  buttons.forEach(b => b.disabled = true);
+  result.innerHTML = '<span class="label">Надсилаємо команду "' + value + '"…</span>';
+
+  try {
+    const res = await fetch('http://localhost:8000/actuators/led', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ value })
+    });
+    // тіло читаємо як текст: показуємо як є, навіть якщо це не JSON
+    const body = await res.text();
+    result.textContent = res.status + '\n' + body;
+    result.insertAdjacentHTML('afterbegin',
+      '<span class="label">Команду "' + value + '" надіслано. Відповідь сервера:</span>\n\n');
+  } catch (e) {
+    result.textContent = e.message;
+    result.insertAdjacentHTML('afterbegin',
+      '<span class="label error">Помилка мережі — команда не дійшла до сервера:</span>\n\n');
+  } finally {
+    buttons.forEach(b => b.disabled = false);
+  }
+}
+
+document.getElementById('on').onclick = () => send('on');
+document.getElementById('off').onclick = () => send('off');
+</script>
+
+</body>
+</html>
