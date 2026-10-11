@@ -3,46 +3,84 @@
 #include <PubSubClient.h>
 #include "../net/net.h"
 #include "../secrets.h"
+#include "../version.h"
 
 #define MQTT_PORT       8883                                  // MQTT over TLS, НЕ 1883!
 #define TOPIC_TELEMETRY "iot-course/ozasymenko/sensors/data"  // вгору: публікуємо
 #define TOPIC_CMD       "iot-course/ozasymenko/commands/led"        // вниз: слухаємо
 
-#define RECONNECT_INTERVAL 5000  // мс між спробами
+// ═══ ТОПІКИ РОБІТ (OTA) ═══
+// Зарезервовані топіки AWS — починаються з $aws, ми їх не вигадуємо.
+// Складаємо через THINGNAME, бо в них зашите ім'я Thing.
+// $next — службове слово «наступна робота в черзі», jobId знати не треба.
+#define TOPIC_JOBS_NOTIFY  "$aws/things/" THINGNAME "/jobs/notify-next"
+#define TOPIC_JOBS_GET     "$aws/things/" THINGNAME "/jobs/$next/get"
+#define TOPIC_JOBS_ACCEPT  "$aws/things/" THINGNAME "/jobs/$next/get/accepted"
+
+// Експоненційний backoff між спробами реконекту: 1с, 2с, 4с, 8с, 16с, стеля 30с.
+// Після вдалого конекту інтервал скидається назад до мінімуму.
+#define RECONNECT_MIN 1000UL
+#define RECONNECT_MAX 30000UL
 
 static WiFiClientSecure net;
 static PubSubClient     mqttClient(net);
 
 static unsigned long lastReconnectAttempt = 0;
+static unsigned long reconnectInterval = RECONNECT_MIN;
 
 // Чи вдалась остання синхронізація часу — якщо ні, TLS-handshake завжди
 // падатиме (state -2), тому перед кожною спробою реконекту час треба
 // синхронізувати повторно, а не лише сам mqtt_connect()
 static bool timeOk = false;
 
-// Пише callback, читає loop() — тому volatile на прапорці
+// Команда: пише callback, читає loop() — тому volatile на прапорці
 static char          commandBuf[64];
 static volatile bool commandReady = false;
 
+// Робота: окремий буфер, ВЕЛИКИЙ. Документ з presigned URL — це не
+// 256 байт. 3 КБ із запасом.
+static char          jobBuf[3072];
+static volatile bool jobReady = false;
+
 // ═══════════════════════════════════════════════════════════
-// CALLBACK — смикає його mqttClient.loop(), коли прийшло повідомлення
-// Правило: скопіювати, підняти прапорець, вийти.
+// CALLBACK — диспетчер на три види топіка (команда / notify / документ
+// роботи). Правило те саме: скопіювати, підняти прапорець, вийти.
+// Жодної роботи тут: буфер PubSubClient спільний на вхід і вихід,
+// а поки ми в callback — не летить PING і брокер рахує нас мертвими.
+// Завантаження прошивки тим паче тут робити НЕ МОЖНА — це десятки секунд.
 // ═══════════════════════════════════════════════════════════
 static void onMessage(char* topic, byte* payload, unsigned int length) {
-    // topic не розбираємо: підписка одна.
-    // Зʼявиться commands/fan — роутинг по topic буде саме тут
-    unsigned int n = length;
 
-    // sizeof(commandBuf), а НЕ sizeof(payload):
-    // payload — вказівник, sizeof від нього дасть 4
-    if (n > sizeof(commandBuf) - 1) {
-        n = sizeof(commandBuf) - 1;      // -1 — місце під '\0'
+    // ── Команда на LED ──
+    if (strstr(topic, "/commands/led") != NULL) {
+        unsigned int n = length;
+        // sizeof(commandBuf), а НЕ sizeof(payload):
+        // payload — вказівник, sizeof від нього дасть 4
+        if (n > sizeof(commandBuf) - 1) {
+            n = sizeof(commandBuf) - 1;      // -1 — місце під '\0'
+        }
+        memcpy(commandBuf, payload, n);
+        commandBuf[n] = '\0';                // payload прийшов без термінатора
+        commandReady = true;                 // роботу зробить loop()
+        return;
     }
 
-    memcpy(commandBuf, payload, n);
-    commandBuf[n] = '\0';                // payload прийшов без термінатора
+    // ── Сповіщення «є нова робота» ──
+    // Нічого не копіюємо: одразу просимо повний документ.
+    // publish із callback — коротка операція, це прийнятно.
+    if (strstr(topic, "/jobs/notify-next") != NULL) {
+        mqttClient.publish(TOPIC_JOBS_GET, "{}");
+        return;
+    }
 
-    commandReady = true;                 // роботу зробить loop()
+    // ── Приїхав документ роботи ──
+    if (strstr(topic, "/jobs/$next/get/accepted") != NULL) {
+        if (length >= sizeof(jobBuf)) return;   // не вліз — ігноруємо
+        memcpy(jobBuf, payload, length);
+        jobBuf[length] = '\0';
+        jobReady = true;                        // роботу зробить loop() → ota
+        return;
+    }
 }
 
 bool mqtt_begin() {
@@ -67,12 +105,13 @@ bool mqtt_begin() {
     net.setTimeout(10);           // TCP connect + читання, секунди
     net.setHandshakeTimeout(15);  // TLS-хендшейк, секунди
 
-    // 4. Брокер: наш AWS endpoint, порт 8883
+    // 4. Вказуємо брокер: наш AWS endpoint, порт 8883
     mqttClient.setServer(AWS_IOT_ENDPOINT, MQTT_PORT);
 
-    // Буфер PubSubClient за замовчуванням 256 байт — замалий, мовчки обрізає
-    // JSON. Один і той самий буфер обслуговує і вхід, і вихід.
-    mqttClient.setBufferSize(512);
+    // Буфер підняли з 512 до 3072 — документ роботи з presigned URL у 512
+    // НЕ ВЛІЗЕ, обріжеться МОВЧКИ, а ArduinoJson поверне IncompleteInput
+    // і виглядатиме як баг парсера.
+    mqttClient.setBufferSize(3072);
 
     // Callback ставимо ДО connect() — щоб не проґавити повідомлення
     mqttClient.setCallback(onMessage);
@@ -87,24 +126,38 @@ bool mqtt_begin() {
 bool mqtt_connect() {
     Serial.print("[MQTT] Підключаємось до AWS IoT Core...");
 
-    if (mqttClient.connect(THINGNAME)) {
-        Serial.println(" OK");
-
-        // QoS 1: команда унікальна, повторити її нікому.
-        // Телеметрію женемо QoS 0 — там наступний пакет перекриє втрачений
-        if (mqttClient.subscribe(TOPIC_CMD, 1)) {
-            Serial.println("[MQTT] Підписані на commands/led");
-        } else {
-            Serial.println("[MQTT] ПІДПИСКА НЕ ВДАЛАСЬ");
-        }
-        return true;
+    if (!mqttClient.connect(THINGNAME)) {
+        // mqttClient.state() коди: -2 = TLS/handshake помилка
+        // (перевір час і endpoint), 5 = відмовлено (перевір Policy)
+        Serial.print(" помилка: ");
+        Serial.println(mqttClient.state());
+        return false;
     }
 
-    // mqttClient.state() коди: -2 = TLS/handshake помилка
-    // (перевір час і endpoint), 5 = відмовлено (перевір Policy)
-    Serial.print(" помилка: ");
-    Serial.println(mqttClient.state());
-    return false;
+    Serial.println(" OK");
+
+    // QoS 1: команда унікальна, повторити її нікому.
+    // Телеметрію женемо QoS 0 — там наступний пакет перекриє втрачений
+    if (mqttClient.subscribe(TOPIC_CMD, 1)) {
+        Serial.println("[MQTT] Підписані на commands/led");
+    } else {
+        Serial.println("[MQTT] ПІДПИСКА commands НЕ ВДАЛАСЬ");
+    }
+
+    // ── Підписки на роботи (OTA) ──
+    // Всі підписки ТУТ, а не в mqtt_begin(): реконект = нова сесія =
+    // нуль підписок, тож вони мають відновлюватись разом з кожним connect().
+    mqttClient.subscribe(TOPIC_JOBS_NOTIFY, 1);
+    mqttClient.subscribe(TOPIC_JOBS_ACCEPT, 1);
+    Serial.println("[MQTT] Підписані на jobs");
+
+    // ── КРИТИЧНО: одразу питаємо, чи є робота ──
+    // Поки нас не було, роботу могли створити. notify-next тоді не прилетить —
+    // її треба забрати самим. Без цього рядка пропустимо оновлення після
+    // перезавантаження/втрати зв'язку.
+    mqtt_request_next_job();
+
+    return true;
 }
 
 bool mqtt_connected() {
@@ -117,10 +170,12 @@ void mqtt_poll() {
 
 void mqtt_reconnect_tick() {
     unsigned long now = millis();
-    if (now - lastReconnectAttempt <= RECONNECT_INTERVAL) return;
+    if (now - lastReconnectAttempt <= reconnectInterval) return;
 
     lastReconnectAttempt = now;
-    Serial.println("[MQTT] З'єднання втрачено — перепідключаємось...");
+    Serial.print("[MQTT] З'єднання втрачено — перепідключаємось (інтервал ");
+    Serial.print(reconnectInterval / 1000);
+    Serial.println("с)...");
 
     // Wi-Fi міг відвалитись незалежно від MQTT — WiFi.status() завжди дає
     // актуальний стан, кешований прапорець тут би так само застарів,
@@ -139,7 +194,14 @@ void mqtt_reconnect_tick() {
         timeOk = net_time_sync();
     }
 
-    mqtt_connect();   // subscribe() всередині — підписка відновиться
+    if (mqtt_connect()) {   // subscribe() всередині — підписка відновиться
+        // Вдалось — наступного разу, коли з'єднання знову впаде,
+        // відлік backoff починається заново з мінімуму
+        reconnectInterval = RECONNECT_MIN;
+    } else {
+        // Експоненційне зростання з стелею: 1с → 2с → 4с → ... → 30с
+        reconnectInterval = min(reconnectInterval * 2, RECONNECT_MAX);
+    }
 }
 
 const char* mqtt_take_command() {
@@ -148,7 +210,43 @@ const char* mqtt_take_command() {
     return commandBuf;
 }
 
-// received_at тут НЕМА — його дописує правило в хмарі
+// Віддаємо сирий документ. Парсить ota.cpp.
+const char* mqtt_take_job() {
+    if (!jobReady) return NULL;
+    jobReady = false;
+    return jobBuf;
+}
+
+void mqtt_disconnect_for_ota() {
+    mqttClient.disconnect();
+    net.stop();   // саме net.stop() — інакше контекст mbedTLS лишиться в купі
+    Serial.println("[MQTT] З'єднання закрито на час OTA");
+}
+
+void mqtt_request_next_job() {
+    // Порожнє тіло: сам факт публікації в get — це і є запит
+    mqttClient.publish(TOPIC_JOBS_GET, "{}");
+}
+
+void mqtt_report_status(const char* jobId, const char* status) {
+    // Топік звіту містить jobId усередині себе — ось навіщо ota його зберігає
+    char topic[160];
+    snprintf(topic, sizeof(topic),
+             "$aws/things/" THINGNAME "/jobs/%s/update", jobId);
+
+    char payload[64];
+    snprintf(payload, sizeof(payload), "{\"status\":\"%s\"}", status);
+
+    mqttClient.publish(topic, payload);
+    Serial.print("[JOBS] Статус ");
+    Serial.print(status);
+    Serial.print(" для ");
+    Serial.println(jobId);
+}
+
+// received_at тут НЕМА — його дописує правило в хмарі.
+// firmware_version — щоб у хмарі було видно, хто на якій версії; після
+// OTA це єдиний доказ, що оновлення справді відбулось.
 void mqtt_publish_telemetry(const char* device_id, float temperature, float humidity, float lux) {
     if (!mqttClient.connected()) {
         Serial.println("[MQTT] Не підключено — пропускаємо");
@@ -159,10 +257,11 @@ void mqtt_publish_telemetry(const char* device_id, float temperature, float humi
     time(&now);
 
     // snprintf замість String — безпечно для heap
-    char payload[160];
+    char payload[200];
     snprintf(payload, sizeof(payload),
-        "{\"device_id\":\"%s\",\"timestamp\":%lu,\"temperature\":%.1f,\"humidity\":%.1f,\"lux\":%.1f}",
-        device_id, (unsigned long)now, temperature, humidity, lux);
+        "{\"device_id\":\"%s\",\"timestamp\":%lu,\"temperature\":%.1f,\"humidity\":%.1f,"
+        "\"lux\":%.1f,\"firmware_version\":\"%s\"}",
+        device_id, (unsigned long)now, temperature, humidity, lux, FIRMWARE_VERSION);
 
     Serial.print("[MQTT] Публікуємо: ");
     Serial.println(payload);

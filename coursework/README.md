@@ -57,7 +57,8 @@ DynamoDB/AWS напряму, а через ті самі `GET /sensors/latest` �
 ## Структура репозиторію
 
 ```
-ESP32/     — прошивка (PlatformIO, модулі: net, mqtt, dht, ldr, led, button)
+ESP32/     — прошивка (PlatformIO, модулі: net, mqtt, dht, ldr, led, button, ota)
+           — version.h, partitions.csv, merge_firmware.py, job.json(.README.md) — OTA
 FastAPI/   — бекенд: читання DynamoDB + публікація команд в AWS IoT
 HTML/      — одна сторінка з двома кнопками (Увімкнути / Вимкнути)
 grafana/   — dashboard.json для імпорту в Grafana
@@ -78,6 +79,8 @@ grafana/   — dashboard.json для імпорту в Grafana
 | IAM-користувач (FastAPI, `.env`) | `dynamodb:Query` на `table/iot_telemetry` + `iot:Publish` на `topic/iot-course/ozasymenko/commands/*` | читання телеметрії й публікація команд із бекенда |
 | MQTT топік команд | `iot-course/ozasymenko/commands/led` | FastAPI публікує, ESP32 підписується |
 | MQTT топік подій | `iot-course/ozasymenko/events` | ESP32 публікує після виконання команди (`{"event":"led_changed",...}`), підтверджуючи результат |
+| MQTT топіки робіт (OTA) | `$aws/things/esp32-zasymenko/jobs/{notify-next,$next/get,$next/get/accepted,*/update}` | зарезервовані AWS; пристрій слухає нотифікацію й документ, запитує й звітує |
+| Presigning-роль (S3) | `s3:GetObject` на бакет з прошивкою, довіра до `iot.amazonaws.com` | перетворює плейсхолдер у `job.json` на presigned URL — деталі в `ESP32/job.json.README.md` |
 
 **SQL правила `StoreTelemetry`** (кладе телеметрію в DynamoDB — саме звідси
 `received_at`, за яким `db.py` робить query):
@@ -185,6 +188,64 @@ MQTT → iot-course/ozasymenko/events:
 Побачити цю подію можна в AWS IoT Console → MQTT test client, підписавшись
 на `iot-course/ozasymenko/events` — саме вона, а не `202` від FastAPI, і є
 доказом, що світлодіод реально змінив стан.
+
+---
+
+## OTA (AWS IoT Jobs)
+
+Пристрій уміє оновити сам себе: AWS IoT Jobs доставляє документ роботи по
+MQTT, ESP32 якає новий образ по HTTPS з S3, пише його у вільний OTA-слот
+(`partitions.csv` — два слоти, `app0`/`app1`) і перезавантажується вже в
+нову версію. `version.h` — єдине джерело правди про поточну версію;
+`firmware_version` з нього потрапляє і в телеметрію.
+
+### Що для цього потрібно в AWS (окрім Policy пристрою з таблиці вище)
+
+1. **Підписки/публікації на job-топіки** додаються в ту саму Policy
+   пристрою — `Subscribe`/`Receive` на `notify-next` і
+   `$next/get/accepted`, `Publish` на `$next/get` і `*/update`.
+2. **Presigning-роль** — окрема IAM-роль (не Policy пристрою!), яку AWS IoT
+   приміряє, щоб перетворити плейсхолдер `${aws:iot:s3-presigned-url-v2:...}`
+   у `job.json` на робоче посилання. Trust policy, permissions policy і
+   куди саме її підключати (`presignedUrlConfig.roleArn` у `CreateJob`,
+   не в сам `job.json`) — усе в `ESP32/job.json.README.md`.
+
+### Як випустити нову версію
+
+Порядок критичний — спершу те, що їде **в бакет**, і аж потім те, що
+лишається **в чіпі**:
+
+1. `version.h` → `FIRMWARE_VERSION "1.1.0"`
+2. Зібрати (`pio run`), залити `.pio/build/esp32dev/firmware.bin`
+   (**не** `merged.bin` — у ньому на позиції 0 padding/bootloader, не
+   `0xE9`, `Update` одразу падає з `Wrong Magic Byte`/`Decryption error`)
+   у S3 під іменем з `job.json`, звірити розмір файлу з консоллю S3.
+3. `version.h` → назад на `"1.0.0"` — це тепер «старий» пристрій, який
+   зараз оновиться.
+4. Зібрати ще раз, **перезапустити** симулятор — Wokwi підхоплює новий
+   `merged.bin` лише при старті (`wokwi.toml` вказує саме на нього, не
+   на голий `firmware.bin` — інакше OTA-слоти не видно).
+5. Оновити `version` у `job.json`, покласти в S3, створити Job з новим
+   `jobId` (попередню роботу вже закрито як `SUCCEEDED` — пристрій до неї
+   не повернеться).
+
+**Найпідступніша помилка — забути крок 1.** Якщо `firmware.bin`, залитий
+у S3, зібраний зі старим `version.h`, пристрій якає, пише, перезавантажується
+(увесь механізм відпрацьовує!), але `FIRMWARE_VERSION` у новому образі
+все одно `"1.0.0"` — не збігається з `version` у `job.json` → робота не
+закривається → пристрій якає ту саму «нову» версію по колу нескінченно.
+Перевіряється одним рядком у Serial після оновлення: має бути
+`розділ app1` і правильна версія в `ESP32 — OTA, версія ...`.
+
+### Діагностика
+
+- `розділ app1` + причина ресету `8` (DEEPSLEEP) → оновились.
+- `розділ app0` після оновлення → відкотились (нова прошивка не дійшла до
+  MQTT за `CONFIRM_TIMEOUT_MS`, або впала на старті).
+- `[OTA] Образ підтверджено` у Serial — доказ, що rollback більше не
+  спрацює; без цього рядка оновлення ще не прийняте назавжди.
+- Повний перелік симптомів і причин — `ESP32/job.json.README.md` і
+  коментарі в `src/ota/ota.cpp`.
 
 ---
 
