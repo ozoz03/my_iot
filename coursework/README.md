@@ -1,4 +1,4 @@
-# Домашня робота 6 — FastAPI: бекенд, що не тільки читає, а й командує
+# Курсовий проект. Основна функціональність. OTA, DeepSleep, Device Shadow
 
 Три частини, що працюють разом: пристрій публікує телеметрію в хмару,
 бекенд її читає й показує, і той самий бекенд може послати пристрою команду
@@ -194,6 +194,32 @@ MQTT → iot-course/ozasymenko/events:
 
 ## OTA (AWS IoT Jobs)
 
+
+```
+                          AWS IoT Core
+                               │
+   ┌───────────────────────────┼───────────────────────────┐
+   │                           │                           │
+telemetry                   shadow                       jobs
+   │                           │                           │
+   ▼                           ▼                           ▼
+Rules → DynamoDB     $aws/things/<Thing>/shadow/    $aws/things/<Thing>/jobs/
+                       get            → desired       notify-next
+                       get/accepted   ← документ      $next/get/accepted
+                       update         → reported             │
+                       update/accepted ← підтвердження       │
+                       update/delta   ← різниця              ▼
+                               │                     HTTPS GET з S3
+                               ▼                             │
+                            ESP32 → LED, sleepSeconds ◄──────┘
+                               │
+                    esp_deep_sleep_start()
+                               │
+                      30 с тиші на 10 мкА
+                               │
+                      DEEPSLEEP_RESET → новий setup()
+```
+
 Пристрій уміє оновити сам себе: AWS IoT Jobs доставляє документ роботи по
 MQTT, ESP32 якає новий образ по HTTPS з S3, пише його у вільний OTA-слот
 (`partitions.csv` — два слоти, `app0`/`app1`) і перезавантажується вже в
@@ -298,7 +324,9 @@ CONNECT і SUBSCRIBE проходили чисто, а вже наступна �
 ### Що переживає сон
 
 ```cpp
-RTC_DATA_ATTR int bootCount = 0;
+RTC_DATA_ATTR int  bootCount    = 0;
+RTC_DATA_ATTR int  sleepSeconds = 30; 
+RTC_DATA_ATTR char indicator[8] = "off";
 ```
 
 `RTC_DATA_ATTR` кладе змінну в RTC-памʼять — єдине, що лишається під
