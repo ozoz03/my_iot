@@ -290,6 +290,86 @@ MQTT, ESP32 якає новий образ по HTTPS з S3, пише його �
 недосяжний у нормальному житті, крутиться лише як страховка, якщо йде
 OTA й заснути не можна.
 
+### AWS IOT Security policy
+```
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": "iot:Publish",
+      "Resource": "arn:aws:iot:eu-north-1:<ACCOUNT_ID>:topic/iot-course/ozasymenko/*"
+    },
+    {
+      "Condition": {
+        "Bool": {
+          "iot:Connection.Thing.IsAttached": "true"
+        }
+      },
+      "Effect": "Allow",
+      "Action": "iot:Connect",
+      "Resource": "arn:aws:iot:eu-north-1:<ACCOUNT_ID>:client/${iot:Connection.Thing.ThingName}"
+    },
+    {
+      "Effect": "Allow",
+      "Action": "iot:Subscribe",
+      "Resource": "arn:aws:iot:eu-north-1:<ACCOUNT_ID>:topicfilter/iot-course/ozasymenko/commands/*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": "iot:Receive",
+      "Resource": "arn:aws:iot:eu-north-1:<ACCOUNT_ID>:topic/iot-course/ozasymenko/commands/*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": "iot:Subscribe",
+      "Resource": "arn:aws:iot:eu-north-1:<ACCOUNT_ID>:topicfilter/$aws/things/esp32-zasymenko/jobs/notify-next"
+    },
+    {
+      "Effect": "Allow",
+      "Action": "iot:Receive",
+      "Resource": "arn:aws:iot:eu-north-1:<ACCOUNT_ID>:topic/$aws/things/esp32-zasymenko/jobs/notify-next"
+    },
+    {
+      "Effect": "Allow",
+      "Action": "iot:Subscribe",
+      "Resource": "arn:aws:iot:eu-north-1:<ACCOUNT_ID>:topicfilter/$aws/things/esp32-zasymenko/jobs/$next/get/accepted"
+    },
+    {
+      "Effect": "Allow",
+      "Action": "iot:Receive",
+      "Resource": "arn:aws:iot:eu-north-1:<ACCOUNT_ID>:topic/$aws/things/esp32-zasymenko/jobs/$next/get/accepted"
+    },
+    {
+      "Effect": "Allow",
+      "Action": "iot:Publish",
+      "Resource": "arn:aws:iot:eu-north-1:<ACCOUNT_ID>:topic/$aws/things/esp32-zasymenko/jobs/$next/get"
+    },
+    {
+      "Effect": "Allow",
+      "Action": "iot:Publish",
+      "Resource": "arn:aws:iot:eu-north-1:<ACCOUNT_ID>:topic/$aws/things/esp32-zasymenko/jobs/*/update"
+    },
+    {
+      "Effect": "Allow",
+      "Action": "iot:Publish",
+      "Resource": "arn:aws:iot:eu-north-1:<ACCOUNT_ID>:topic/$aws/things/esp32-zasymenko/shadow/*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "iot:Subscribe",
+        "iot:Receive"
+      ],
+      "Resource": [
+        "arn:aws:iot:eu-north-1:<ACCOUNT_ID>:topicfilter/$aws/things/esp32-zasymenko/shadow/*",
+        "arn:aws:iot:eu-north-1:<ACCOUNT_ID>:topic/$aws/things/esp32-zasymenko/shadow/*"
+      ]
+    }
+  ]
+}
+```
+
 ### Один цикл
 
 1. `mqtt_begin()` + `mqtt_connect()` — якщо не вдалось (нема Wi-Fi чи MQTT) —
@@ -475,5 +555,3 @@ payload. Дія Rule — запис у CloudWatch Logs, група `iot-command-
 незалежний від ack пристрою, доказ того, що команда дійшла до AWS IoT Core.
 
 Аналогічно з вимиканням світлодіода.
-
-[Демонстрація роботи (запис екрана)](<ESP32/images/Screen Recording 2026-10-03 at 23.08.35.mov>)
