@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from pydantic import BaseModel
 from typing import Literal
-from iot_client import send_led_command
+from iot_client import send_led_command, set_led_desired
 load_dotenv()          # ← до імпорту db, щоб змінні вже були в середовищі
 import db
 
@@ -40,11 +40,20 @@ def sensors_history(minutes: int = 30):
 
 @app.post("/actuators/led", status_code=202)
 def set_led(cmd:LedCommand):
+    # Shadow — основний канал: desired лежить у хмарі й чекає, поки
+    # пристрій сам прийде по нього на черговому пробудженні (Deep Sleep).
+    try:
+        set_led_desired(cmd.value)
+    except Exception:
+        raise HTTPException(502, "AWS IoT Shadow недоступний")
+
+    # Старий топік команд — вузьке вікно: дійде, лише якщо пристрій
+    # саме зараз на звʼязку. Best-effort, не валимо запит через нього.
     try:
         send_led_command(cmd.value)
     except Exception:
-        raise HTTPException(502, "AWS IoT недоступний")
-    
+        pass
+
     return {"accepted": True, "value": cmd.value}
 
 

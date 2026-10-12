@@ -11,6 +11,7 @@
 #include "button/button.h"
 #include "ota/ota.h"
 #include "wdt/wdt.h"
+#include "shadow/shadow.h"
 
 // ═══════════════════════════════════════════════════════════
 // ПАМʼЯТЬ, ЩО ПЕРЕЖИВАЄ СОН
@@ -20,10 +21,12 @@
 // типи. Ініціалізація нижче виконується ЛИШЕ при подачі живлення,
 // після пробудження — ні. Будь-який РЕСЕТ (не пробудження) чистить її.
 // ═══════════════════════════════════════════════════════════
-RTC_DATA_ATTR int bootCount = 0;
+RTC_DATA_ATTR int  bootCount    = 0;
+RTC_DATA_ATTR int  sleepSeconds = 30;    // скільки спати між циклами — керується з тіні
+RTC_DATA_ATTR char indicator[8] = "off"; // бажаний стан LED — так само з тіні
 
-#define SLEEP_SECONDS 60    // скільки спати між циклами
-#define WAIT_JOB_MS   2000  // скільки чекаємо відповідь про роботу (і заразом команду)
+#define WAIT_JOB_MS    2000  // скільки чекаємо відповідь про роботу (і заразом команду)
+#define WAIT_SHADOW_MS 500   // окреме, коротше вікно під тінь — див. shadow_wait_for_delta()
 
 // Викликається з work_cycle() і як idle-callback з net.cpp під час
 // Wi-Fi/NTP-очікування — інакше кнопка "не працює", поки йде підключення.
@@ -69,6 +72,10 @@ static void go_to_sleep() {
         return;
     }
 
+    // Гасимо індикацію ДО фінального друку — led_set() сам логує в Serial,
+    // а після flush() друкувати вже не можна.
+    led_set("off");
+
     // ═══ ЗАКРИВАЄМО МЕРЕЖУ ═══
     // Wi-Fi драйвер має власні задачі й переривання. Іти в сон з живим
     // радіо — напрошуватись на проблеми при вході в критичну секцію.
@@ -81,7 +88,7 @@ static void go_to_sleep() {
     delay(100);
 
     Serial.print("[SLEEP] Засинаємо на ");
-    Serial.print(SLEEP_SECONDS);
+    Serial.print(sleepSeconds);
     Serial.println(" с");
 
     // ОСТАННІЙ РЯДОК ПЕРЕД СНОМ. Після flush() друкувати вже не можна:
@@ -95,9 +102,9 @@ static void go_to_sleep() {
     wdt_silence_for_sleep();
 
     // Оці два рядки і є Deep Sleep: керування сюди більше не
-    // повертається, а через SLEEP_SECONDS чіп стартує з нуля —
+    // повертається, а через sleepSeconds чіп стартує з нуля —
     // з новим setup() і з живою RTC-памʼяттю.
-    esp_sleep_enable_timer_wakeup((uint64_t)SLEEP_SECONDS * 1000000ULL);
+    esp_sleep_enable_timer_wakeup((uint64_t)sleepSeconds * 1000000ULL);
     esp_deep_sleep_start();
 }
 
@@ -126,6 +133,15 @@ static void work_cycle() {
                   (int)esp_reset_reason(),
                   bootCount);
 
+    // ── ВІДНОВЛЮЄМО ФАКТИЧНИЙ СТАН ──
+    // Deep Sleep знеструмлює GPIO — світлодіод гасне сам собою. Якщо
+    // цього не зробити, вийде брехня: у reported тіні написано "on",
+    // а лампочка фізично не горить. AWS не побачить різниці
+    // (desired == reported) і дельту не надішле — світло вже ніколи
+    // не увімкнеться. Тінь має відповідати реальності, а реальність
+    // після сну треба відтворювати руками.
+    led_set(indicator);
+
     if (!mqtt_begin()) {
         Serial.println("[MAIN] Мережа недоступна — спимо до наступної спроби");
         go_to_sleep();
@@ -147,6 +163,15 @@ static void work_cycle() {
     // ресет і так або підтверджений, або відкочений автоматично.
     esp_ota_mark_app_valid_cancel_rollback();
     Serial.println("[OTA] Образ підтверджено — rollback скасовано");
+
+    // ── Який стан має бути? ──
+    // Публікуємо запит заздалегідь, а не перед самим чеканням — поки
+    // йде очікування робіт нижче (mqtt_wait_for_job тримає сокет
+    // відкритим і читає його), відповідь тіні вже може встигнути
+    // дійти. Та покладатись лише на це вікно НЕ можна: воно виходить,
+    // щойно прийде відповідь про роботу (а та зазвичай швидша за
+    // тінь), тому нижче є ще окреме коротке чекання саме під тінь.
+    shadow_request();
 
     // Чи є робота (OTA)? Запит уже опублікований усередині
     // mqtt_connect(). Той самий цикл очікування заразом ловить і
@@ -172,10 +197,49 @@ static void work_cycle() {
         Serial.println("[Помилка] DHT22: сенсор повернув некоректні дані (NaN) — пропускаємо публікацію");
     }
 
-    // Могла прилетіти, поки ми крутили poll в очікуванні вище. Чесне
+    // Якщо відповідь вже встигла прийти під час mqtt_wait_for_job() —
+    // ця функція побачить shadowReady==true й вийде миттєво. Якщо ні —
+    // дає тіні ще трохи часу окремо, перш ніж здатись до наступного
+    // пробудження.
+    shadow_wait_for_delta(WAIT_SHADOW_MS);
+
+    // bootCount == 1 — щойно після POWERON/перепрошивки: RTC-памʼять
+    // чиста (indicator/sleepSeconds — заводські значення), а AWS досі
+    // памʼятає СТАРИЙ reported із попереднього життя пристрою. Якщо той
+    // старий reported випадково збігається з desired — delta не прийде
+    // ВЗАГАЛІ (AWS чесно вважає все вже синхронізованим), і фактичний
+    // стан після перепрошивки ніколи не виправиться сам. Тому на першому
+    // пробудженні звітуємо примусово — навіть без дельти — щоб AWS
+    // перерахував delta від актуального стану вже на наступному заході.
+    bool mustReport = (bootCount == 1);
+
+    ShadowDelta delta;
+    if (shadow_take_delta(&delta)) {
+
+        if (delta.hasIndicator) {
+            strncpy(indicator, delta.indicator, sizeof(indicator) - 1);
+            indicator[sizeof(indicator) - 1] = '\0';
+            led_set(indicator);
+        }
+
+        if (delta.hasInterval) {
+            sleepSeconds = delta.interval;
+            Serial.print("[MAIN] Новий інтервал сну: ");
+            Serial.println(sleepSeconds);
+        }
+
+        mustReport = true;
+    }
+
+    if (mustReport) {
+        shadow_report(indicator, sleepSeconds);
+    }
+
+    // ── Старий канал команд ──
+    // Могла прилетіти, поки ми крутили poll в очікуваннях вище. Чесне
     // обмеження: доходить лише якщо її опублікували саме в це вузьке
-    // вікно. Усе, що надіслали під час сну, — втрачено (без Device
-    // Shadow надійного керування під час сну не буває).
+    // вікно. Лишаємо канал живим (FastAPI поки й так шле в обидва
+    // місця), але основне керування тепер — тінь вище.
     const char* cmd = mqtt_take_command();
     if (cmd) {
         led_handle_command(cmd);

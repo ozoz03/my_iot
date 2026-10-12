@@ -21,6 +21,16 @@ bool net_wifi_connect() {
     // Канал 6 — пропускає сканування, економить ~4 секунди в Wokwi
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD, 6);
 
+    // За замовчуванням модем іде в power-save (DTIM-сон) між пакетами.
+    // Поки ми просто чекаємо відповідь (shadow/job) і не гоняємо радіо
+    // постійно, модем засинає — і TLS-сесія рветься мовчки, за секунди
+    // після CONNECT: WiFiClientSecure.connected() раптом стає false,
+    // а PubSubClient це бачить як MQTT_CONNECTION_LOST (-3). Для Deep
+    // Sleep економія від modem-sleep не потрібна: прокинулись — зробили
+    // все за секунди — заснули повністю (radio off), тут power-save
+    // лише шкодить стабільності зв'язку.
+    WiFi.setSleep(false);
+
     unsigned long start = millis();
     while (!net_wifi_connected()) {
         if (millis() - start > WIFI_TIMEOUT) {

@@ -71,15 +71,16 @@ grafana/   — dashboard.json для імпорту в Grafana
 | Ресурс | Назва/ARN | Де використовується |
 |---|---|---|
 | Thing | `esp32-zasymenko` | ESP32, сертифікат X.509 |
-| IoT Policy (на сертифікаті) | `Connect` (по `${iot:Connection.Thing.ThingName}`) + `Publish` на `topic/iot-course/ozasymenko/*` + `Subscribe`/`Receive` на `.../commands/*` | підключення, телеметрія і прийом команд — деталі в `ESP32/README.md` |
+| IoT Policy (на сертифікаті) | `Connect` (по `${iot:Connection.Thing.ThingName}`) + `Publish` на `topic/iot-course/ozasymenko/*` + `Subscribe`/`Receive` на `.../commands/*` + `Publish` на `shadow/get`/`shadow/update` + `Subscribe`/`Receive` на `shadow/get/accepted`, `shadow/update/delta`, `shadow/update/accepted`, `shadow/update/rejected` | підключення, телеметрія, прийом команд, Device Shadow — деталі в `ESP32/README.md` |
 | Rules Engine | `StoreTelemetry` (→ DynamoDB), `TemperatureMoreThan28` (→ CloudWatch), `LogCommand` (→ CloudWatch) | записує телеметрію, лог температурних подій, лог команд |
 | IAM-роль для Rule | `iot_write_db` | `dynamodb:PutItem` + запис помилок у CloudWatch Logs |
 | DynamoDB таблиця | `iot_telemetry` (pk `device_id`, sk `received_at`) | зберігає телеметрію |
 | CloudWatch Log Groups | `iot_db_store_errors`, `temperatureLogGroup`, `iot-command-group` | помилки Rule / температурні події / лог усіх команд |
-| IAM-користувач (FastAPI, `.env`) | `dynamodb:Query` на `table/iot_telemetry` + `iot:Publish` на `topic/iot-course/ozasymenko/commands/*` | читання телеметрії й публікація команд із бекенда |
-| MQTT топік команд | `iot-course/ozasymenko/commands/led` | FastAPI публікує, ESP32 підписується |
+| IAM-користувач (FastAPI, `.env`) | `dynamodb:Query` на `table/iot_telemetry` + `iot:Publish` на `topic/iot-course/ozasymenko/commands/*` + `iot:UpdateThingShadow` на `thing/esp32-zasymenko` | читання телеметрії, публікація команд і запис бажаного стану в тінь із бекенда |
+| MQTT топік команд | `iot-course/ozasymenko/commands/led` | FastAPI публікує, ESP32 підписується — вузьке вікно, best-effort (деталі нижче) |
 | MQTT топік подій | `iot-course/ozasymenko/events` | ESP32 публікує після виконання команди (`{"event":"led_changed",...}`), підтверджуючи результат |
 | MQTT топіки робіт (OTA) | `$aws/things/esp32-zasymenko/jobs/{notify-next,$next/get,$next/get/accepted,*/update}` | зарезервовані AWS; пристрій слухає нотифікацію й документ, запитує й звітує |
+| Device Shadow (класична, без імені) | `$aws/things/esp32-zasymenko/shadow/{get,get/accepted,update,update/delta,update/accepted,update/rejected}` | `desired.indicator`/`desired.interval` пише FastAPI, `reported` — пристрій; деталі нижче |
 | Presigning-роль (S3) | `s3:GetObject` на бакет з прошивкою, довіра до `iot.amazonaws.com` | перетворює плейсхолдер у `job.json` на presigned URL — деталі в `ESP32/job.json.README.md` |
 
 **SQL правила `StoreTelemetry`** (кладе телеметрію в DynamoDB — саме звідси
@@ -296,15 +297,17 @@ reset, втрата живлення) — тоді `bootCount` знову `0`. �
 watchdog) — він існує виключно заради симулятора. Повний розбір із
 арифметикою регістрів — `src/wdt/wdt.cpp`.
 
-### Свідоме обмеження: команди під час сну губляться
+### Обмеження старого каналу команд (`/commands/led`) — вирішено тінню
 
 LED-команда (`/commands/led`) доходить, лише якщо її опублікували саме у
 вузьке вікно активності (кроки 3-5 вище, ~2-3с). Усе надіслане, поки
-пристрій спить, — втрачено: стан LED між циклами **не зберігається і не
-відновлюється**. Це усвідомлений наслідок переходу на Deep Sleep без
-Device Shadow — надійне керування сплячим пристроєм вимагає моделі
-«стан, що лежить і чекає» (AWS IoT Device Shadow), а не події, яку
-читає лише той, хто зараз слухає.
+пристрій спить, раніше губилось безповоротно: стан LED між циклами
+**не зберігався і не відновлювався**.
+
+Це вирішено Device Shadow (розділ нижче) — `desired.indicator` лежить у
+хмарі й чекає, пристрій сам забирає його на кожному пробудженні. Канал
+команд лишився живим як другорядний, best-effort шлях (FastAPI й далі
+шле в обидва місця), але основне керування тепер — тінь.
 
 ### Побічний ефект для експоненційного backoff
 
@@ -313,6 +316,61 @@ Device Shadow — надійне керування сплячим пристр�
 наступне пробудження, а не повторні спроби всередині одного активного
 вікна. Мертвий код, не видаляв навмисно (а раптом знадобиться для
 «завжди ввімкненого» режиму) — скажи, якщо прибрати.
+
+---
+
+## Device Shadow
+
+Deep Sleep створює проблему: LED-команда — подія, а подію нема кому
+слухати, поки пристрій спить. Рішення — AWS IoT Device Shadow, документ
+у хмарі, що лежить і чекає, а не летить у конкретну мить:
+
+- `desired` — яким має бути стан. Пише FastAPI (`iot.update_thing_shadow`).
+- `reported` — яким стан є насправді. Пише пристрій.
+- AWS сам рахує різницю (`delta`) між `desired` і `reported` та надсилає
+  **тільки її** — не весь документ.
+
+Використовується класична (безіменна) тінь: топіки без `/name/<shadowName>`.
+
+### Один цикл (додано до `work_cycle()`)
+
+1. `led_set(indicator)` — на самому початку циклу, ДО підключення.
+   Deep Sleep знеструмлює GPIO, світлодіод гасне сам собою фізично, тож
+   фактичний стан спочатку відновлюємо з `RTC_DATA_ATTR indicator` — без
+   цього `reported` брехав би (написано "on", а лампочка не горить).
+2. `shadow_request()` → `$aws/.../shadow/get` — питаємо повний документ.
+3. `shadow_wait_for_delta(2000)` — чекаємо `get/accepted` (там дельта
+   лежить у `state.delta`) або `update/delta` (дельта в корені `state`),
+   що прийде раніше. Тиша за таймаут — нормальна відповідь «уже
+   збігається», не помилка.
+4. Якщо дельта прийшла — застосовуємо (`led_set()`, новий `sleepSeconds`)
+   і одразу `shadow_report()` → `shadow/update` з новим `reported`,
+   чекаючи `update/accepted`. Поки `reported` не оновлено, AWS вважає
+   бажане не виконаним і шле ту саму дельту знову наступного пробудження.
+
+### `has*`-прапорці
+
+Дельта може містити не всі поля, а лише ті, що розійшлись. `ShadowDelta`
+(`src/shadow/shadow.h`) несе `hasIndicator`/`hasInterval` окремо від самих
+значень — якщо `hasInterval == false`, інтервал сну збігається з бажаним,
+і торкатись `sleepSeconds` не можна (інакше можна випадково затерти його
+якимось сміттям із незаповненого поля).
+
+### Чому дві IAM-дії для FastAPI, а не одна
+
+`iot:Publish` (той, що вже був для `/commands/led`) працює з MQTT-топіками
+й не має стосунку до Shadow — запис тіні йде окремим REST-подібним
+API-викликом `update_thing_shadow`, під дією `iot:UpdateThingShadow` на
+ресурс **типу `thing/...`**, а не `topic/...`. Без неї `boto3` повертає
+`ForbiddenException` — саме так і було підтверджено під час розробки, до
+додавання цього дозволу в Policy користувача.
+
+### Чому обидва канали лишились
+
+`main.py` пише в тінь (основний, надійний шлях) і **одночасно** best-effort
+публікує в старий `/commands/led` (другорядний, швидший — якщо пристрій
+саме зараз активний, а не спить, LED зміниться відразу, не чекаючи
+наступного пробудження). Помилка другого каналу не валить запит.
 
 ---
 

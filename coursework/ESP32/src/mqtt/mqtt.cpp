@@ -4,6 +4,7 @@
 #include "../net/net.h"
 #include "../secrets.h"
 #include "../version.h"
+#include "../shadow/shadow.h"
 
 #define MQTT_PORT       8883                                  // MQTT over TLS, НЕ 1883!
 #define TOPIC_TELEMETRY "iot-course/ozasymenko/sensors/data"  // вгору: публікуємо
@@ -50,6 +51,12 @@ static volatile bool jobReady = false;
 // Завантаження прошивки тим паче тут робити НЕ МОЖНА — це десятки секунд.
 // ═══════════════════════════════════════════════════════════
 static void onMessage(char* topic, byte* payload, unsigned int length) {
+
+    // ── Тінь ──
+    // Віддаємо в свій модуль. Він поверне true, якщо топік був його.
+    if (shadow_on_message(topic, payload, length)) {
+        return;
+    }
 
     // ── Команда на LED ──
     if (strstr(topic, "/commands/led") != NULL) {
@@ -151,6 +158,22 @@ bool mqtt_connect() {
     mqttClient.subscribe(TOPIC_JOBS_NOTIFY, 1);
     mqttClient.subscribe(TOPIC_JOBS_ACCEPT, 1);
     Serial.println("[MQTT] Підписані на jobs");
+
+    // ── Підписки на тінь ──
+    // Перелічуємо ЯВНО. Не shadow/# — AWS час від часу додає нові топіки
+    // в цю структуру, і решітка почне тягнути те, чого ми не просили,
+    // а кожне зайве повідомлення — це радіо.
+    // ЯКЩО ТУТ МОВЧАННЯ: перевір Policy. Без shadow-топіків у політиці
+    // підписка «вдається», але дельта не приходить ніколи. Помилки не буде.
+    mqttClient.subscribe(TOPIC_SHADOW_DELTA, 1);
+    mqttClient.subscribe(TOPIC_SHADOW_GET_ACC, 1);
+
+    // Відповідь на НАШ запис у shadow/update. Без цих двох звіт летить
+    // у порожнечу: ми не дізнаємось ні що reported оновлено, ні що
+    // документ відхилено — і дельта повертатиметься щопробудження.
+    mqttClient.subscribe(TOPIC_SHADOW_UPD_ACC, 1);
+    mqttClient.subscribe(TOPIC_SHADOW_UPD_REJ, 1);
+    Serial.println("[MQTT] Підписані на shadow");
 
     // ── КРИТИЧНО: одразу питаємо, чи є робота ──
     // Поки нас не було, роботу могли створити. notify-next тоді не прилетить —
