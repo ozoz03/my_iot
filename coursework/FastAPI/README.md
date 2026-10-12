@@ -89,7 +89,9 @@ requirements.txt  — залежності Python
 | `DEVICE_ID` | `esp32-zasymenko` — partition key, за яким робимо query |
 
 **Дозволи IAM.** До `dynamodb:Query` із Заняття 12 тепер додається
-`iot:Publish` на топік команд. Реальна managed-політика IAM-користувача:
+`iot:Publish` на топік команд і `iot:UpdateThingShadow` на сам Thing (для
+Device Shadow, Заняття 16 — див. нижче). Реальна managed-політика
+IAM-користувача:
 
 ```json
 {
@@ -105,10 +107,22 @@ requirements.txt  — залежності Python
       "Effect": "Allow",
       "Action": "iot:Publish",
       "Resource": "arn:aws:iot:eu-north-1:<ACCOUNT_ID>:topic/iot-course/ozasymenko/commands/*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": "iot:UpdateThingShadow",
+      "Resource": "arn:aws:iot:eu-north-1:<ACCOUNT_ID>:thing/esp32-zasymenko"
     }
   ]
 }
 ```
+
+**Чому це окрема дія, а не ще один `topic/...`.** `iot:Publish` керує
+MQTT-топіками — Shadow пишеться інакше, через REST-подібний control-plane
+виклик `update_thing_shadow()`, під дією `iot:UpdateThingShadow` на ресурс
+**типу `thing/...`**, не `topic/...`. Без цього дозволу `boto3` повертає
+`ForbiddenException`, а не `AccessDeniedException` (інший виняток, бо
+інший API — `iot-data` control-plane метод, не `publish`).
 
 `commands/*` — навмисна маска замість точного `commands/led`, щоб не
 переприв'язувати політику при появі нового актуатора (`commands/fan` тощо)
@@ -178,6 +192,12 @@ fastapi dev main.py
 клієнт, а зовнішній сервіс — тому 502 Bad Gateway, а не 500. Спробуйте
 відключити інтернет і натиснути кнопку: побачите цей шлях.
 
+**502 означає саме збій Shadow, не старого каналу команд.** Ендпоінт
+спершу пише `desired` у тінь (`set_led_desired()`) — якщо це впаде, запит
+валиться з `502` одразу. `send_led_command()` (старий `TOPIC_CMD`) викликається
+ПІСЛЯ, і його помилка проковтується — `202` прийде, навіть якщо цей
+другорядний канал не спрацював.
+
 ### Публікація команди (iot_client.py)
 
 ```python
@@ -196,6 +216,32 @@ iot.publish(topic=TOPIC_CMD, qos=1, payload=payload)
 **`separators=(",", ":")`** — JSON без пробілів. Дрібниця, але на пристрої
 буфер `PubSubClient` фіксований (512 байт), і кожен зайвий байт — це байт
 не на користь.
+
+### Device Shadow (iot_client.py) — другий, надійніший канал
+
+ESP32 тепер спить більшість часу (Deep Sleep, Заняття 16) — команда в
+`TOPIC_CMD` доходить лише якщо опублікована саме у вузьке вікно, коли
+пристрій активний (~2-3с з кожних 30с). Усе надіслане, поки він спить,
+губилось би безповоротно. Рішення — AWS IoT Device Shadow: документ у
+хмарі, що лежить і чекає, а не подія, яку треба встигнути почути.
+
+```python
+def set_led_desired(value: str):
+    payload = json.dumps(
+        {"state": {"desired": {"indicator": value}}},
+        separators=(",", ":"),
+    ).encode("utf-8")
+    iot.update_thing_shadow(thingName=THING_NAME, payload=payload)
+```
+
+`desired` — це те, що ми тут записуємо. `reported` пише сам пристрій на
+кожному пробудженні. AWS сам рахує різницю (`delta`) і присилає пристрою
+тільки її. Повна механіка цикла на пристрої — `../README.md#device-shadow`.
+
+**`POST /actuators/led` викликає обидва канали.** Shadow — основний,
+обов'язковий шлях (помилка тут → `502`). `send_led_command()` — другорядний,
+best-effort (помилка проковтується): якщо пристрій саме зараз на зв'язку,
+LED зміниться відразу, не чекаючи наступного пробудження.
 
 ### Читання (db.py)
 
@@ -268,6 +314,7 @@ app.add_middleware(
 | POST → `502` | немає доступу до AWS IoT: ключі, регіон, інтернет |
 | POST → `202`, але LED мовчить | команда в топіку є — дивіться пристрій (крок 4 вище) |
 | `AccessDeniedException` на publish | у IAM немає `iot:Publish` на ARN топіка |
+| `ForbiddenException` на `update_thing_shadow` | у IAM немає `iot:UpdateThingShadow` на `thing/...` — інший виняток, бо інший API (control-plane, не `publish`) |
 | `Unable to locate credentials` | `.env` не скопійований або `load_dotenv()` після `import db` |
 | `ResourceNotFoundException` | не той регіон або не та назва таблиці |
 | `/sensors/latest` → 404 | таблиця порожня — запустіть пристрій |
@@ -311,7 +358,6 @@ app.add_middleware(
 
 ### Копни глибше (по бажанню)
 
-- **Device Shadow** — бажаний і фактичний стан пристрою замість «випущеної в нікуди» команди
 - **Pydantic response models** — типізована відповідь endpoint замість голого dict
 - **def vs async def** — чому з синхронним boto3 беремо `def` (FastAPI винесе в threadpool)
 - **Автентифікація ендпоінта** — зараз кнопку може натиснути будь-хто, хто знає адресу

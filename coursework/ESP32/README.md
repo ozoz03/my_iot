@@ -1,5 +1,11 @@
 #  Домашня робота 5 — Обробка даних у хмарі: Rules Engine
 
+> Цей файл — знімок прошивки станом на Заняття 11 (Rules Engine). Усе,
+> що додалось пізніше — двостороння комунікація (Заняття 14), OTA через
+> AWS IoT Jobs (Заняття 15) і Deep Sleep + Device Shadow (Заняття 16) —
+> описано в кореневому [../README.md](../README.md); тут лишається
+> тільки доповнення Policy нижче.
+
 ---
 
 ## Архітектурна схема
@@ -103,6 +109,40 @@ Policy прикріплена до X.509-сертифіката пристрою
 ```
 
 `<ACCOUNT_ID>` — номер AWS-акаунта (навмисно не публікується в README; підставити свій при відтворенні).
+
+### Доповнення Policy — OTA (Jobs) і Device Shadow
+
+Два statement-и вище — ще з Заняття 14 (двостороння комунікація). Пізніше
+(Заняття 15-16) додались OTA через AWS IoT Jobs і Device Shadow — свій
+`Publish`/`Subscribe`/`Receive` на зарезервовані `$aws/things/.../jobs/*`
+і `.../shadow/*` топіки. Повний опис обох фіч — у кореневому
+`../README.md` (`## OTA (AWS IoT Jobs)`, `## Device Shadow`). Додані
+statement-и (з `shadow/*`-вайлдкардом — без нього Policy вилазить за
+хардлімiт AWS у 2048 символів):
+
+```json
+{
+  "Effect": "Allow",
+  "Action": "iot:Publish",
+  "Resource": [
+    "arn:aws:iot:eu-north-1:<ACCOUNT_ID>:topic/$aws/things/esp32-zasymenko/jobs/$next/get",
+    "arn:aws:iot:eu-north-1:<ACCOUNT_ID>:topic/$aws/things/esp32-zasymenko/jobs/*/update",
+    "arn:aws:iot:eu-north-1:<ACCOUNT_ID>:topic/$aws/things/esp32-zasymenko/shadow/*"
+  ]
+},
+{
+  "Effect": "Allow",
+  "Action": ["iot:Subscribe", "iot:Receive"],
+  "Resource": [
+    "arn:aws:iot:eu-north-1:<ACCOUNT_ID>:topicfilter/$aws/things/esp32-zasymenko/jobs/notify-next",
+    "arn:aws:iot:eu-north-1:<ACCOUNT_ID>:topicfilter/$aws/things/esp32-zasymenko/jobs/$next/get/accepted",
+    "arn:aws:iot:eu-north-1:<ACCOUNT_ID>:topicfilter/$aws/things/esp32-zasymenko/shadow/*",
+    "arn:aws:iot:eu-north-1:<ACCOUNT_ID>:topic/$aws/things/esp32-zasymenko/jobs/notify-next",
+    "arn:aws:iot:eu-north-1:<ACCOUNT_ID>:topic/$aws/things/esp32-zasymenko/jobs/$next/get/accepted",
+    "arn:aws:iot:eu-north-1:<ACCOUNT_ID>:topic/$aws/things/esp32-zasymenko/shadow/*"
+  ]
+}
+```
 
 ## Rules Engine
 
