@@ -1,5 +1,7 @@
 #include <Arduino.h>
+#include <WiFi.h>
 #include <esp_ota_ops.h>
+#include <esp_sleep.h>
 #include "secrets.h"
 #include "version.h"
 #include "mqtt/mqtt.h"
@@ -8,67 +10,22 @@
 #include "led/led.h"
 #include "button/button.h"
 #include "ota/ota.h"
+#include "wdt/wdt.h"
 
 // ═══════════════════════════════════════════════════════════
-// ТАЙМІНГИ
+// ПАМʼЯТЬ, ЩО ПЕРЕЖИВАЄ СОН
+//
+// RTC_DATA_ATTR кладе змінну у 8 КБ RTC-памʼяті — єдине, що лишається
+// під живленням у Deep Sleep. Тільки глобальні/static, тільки прості
+// типи. Ініціалізація нижче виконується ЛИШЕ при подачі живлення,
+// після пробудження — ні. Будь-який РЕСЕТ (не пробудження) чистить її.
 // ═══════════════════════════════════════════════════════════
-#define MONITOR_INTERVAL   5000    // мс — читання сенсорів
-#define PUBLISH_INTERVAL   30000   // мс — публікація в AWS IoT Core
-#define CONFIRM_TIMEOUT_MS 120000  // скільки нова прошивка має, щоб дійти до MQTT
+RTC_DATA_ATTR int bootCount = 0;
 
-// Якщо останнє вдале вимірювання DHT22 старіше за це — дані вважаються
-// застарілими (сенсор мовчить), publishData() їх не публікує, щоб не
-// видавати старі temperature/humidity за свіжий вимір з новим timestamp
-#define STALE_THRESHOLD (PUBLISH_INTERVAL * 3)
+#define SLEEP_SECONDS 60    // скільки спати між циклами
+#define WAIT_JOB_MS   2000  // скільки чекаємо відповідь про роботу (і заразом команду)
 
-// ── Дані сенсорів (зберігаються між циклами публікації) ──
-struct SensorData {
-  float temperature;
-  float humidity;
-  float lux;
-  bool  hasData;                  // true лише після першого реального вимірювання
-  unsigned long lastGoodMillis;   // millis() останнього вдалого читання DHT22
-};
-
-static SensorData lastGoodData = { 0.0f, 0.0f, 0.0f, false, 0 };
-
-// ── Неблокуючі таймери ───────────────────────────────────
-static unsigned long lastMonitor = 0;
-static unsigned long lastPublish = 0;
-
-// true — ця прошивка щойно прийшла через OTA і ще на випробувальному терміні
-static bool imagePending = false;
-
-// ═══════════════════════════════════════════════════════════
-// ПІДТВЕРДЖЕННЯ ОБРАЗУ: «я не просто завантажився — я працюю»
-//
-// Записати прошивку у флеш — ще не означає оновитись. Ядро зібране з
-// CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y, а це вмикає в завантажувачі
-// випробувальний термін для кожного нового образу:
-//
-//   Update.end(true)      → слот стає NEW
-//   завантажувач          → бачить NEW, ставить PENDING_VERIFY і запускає
-//   підтвердження         → VALID, образ прийнято назавжди
-//   ресет до підтвердження → ABORTED, слот викреслено, вантажимо старий
-//
-// ПАСТКА: Arduino за замовчуванням підтверджує образ САМ — ще до setup(),
-// у initArduino(). «Дожив до setup()» = «прийнято назавжди». Rollback тоді
-// рятує лише від прошивки, що падає на старті. Прошивка, яка стартує, але
-// не може підключитись, буде підтверджена — і пристрій більше ніколи не
-// отримає наступне OTA (воно приходить через MQTT).
-//
-// Тому забираємо рішення собі: verifyRollbackLater() повертає true —
-// «не підтверджуй, я вирішу сам». Доказ життя тут — підключення до MQTT.
-//
-// extern "C" обовʼязковий: ядро оголошує цю функцію в C-файлі як «слабку»
-// (weak). Без extern "C" компілятор C++ дасть їй інше імʼя, ядро її не
-// побачить і мовчки підтвердить образ саме — жодної помилки не буде.
-// ═══════════════════════════════════════════════════════════
-extern "C" bool verifyRollbackLater() {
-    return true;
-}
-
-// Викликається і з loop(), і як idle-callback з net.cpp під час
+// Викликається з work_cycle() і як idle-callback з net.cpp під час
 // Wi-Fi/NTP-очікування — інакше кнопка "не працює", поки йде підключення.
 static void checkButton() {
     if (button_pressed()) {
@@ -77,153 +34,186 @@ static void checkButton() {
 }
 
 // ═══════════════════════════════════════════════════════════
-// ЗЧИТУВАННЯ СЕНСОРІВ — завжди, кожні MONITOR_INTERVAL
+// ПІДТВЕРДЖЕННЯ ОБРАЗУ: «я не просто завантажився — я працюю»
+//
+// Ядро зібране з CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y: кожен новий
+// образ отримує випробувальний термін (PENDING_VERIFY), і будь-який
+// РЕСЕТ до підтвердження відкочує слот назад (ABORTED).
+//
+// Arduino за замовчуванням підтверджує образ САМ, ще до setup(), у
+// initArduino() — «дожив до setup()» = «прийнято назавжди». Прошивка,
+// яка стартує, але не може підключитись до MQTT, буде підтверджена —
+// і пристрій більше ніколи не отримає наступне OTA (воно приходить
+// через MQTT). Тому рішення забираємо собі: verifyRollbackLater()
+// повертає true — «не підтверджуй, я вирішу сам».
+//
+// extern "C" обовʼязковий: ядро оголошує цю функцію в C-файлі як
+// «слабку» (weak). Без extern "C" компілятор C++ дасть їй інше імʼя,
+// ядро її не побачить і мовчки підтвердить образ саме.
 // ═══════════════════════════════════════════════════════════
-static void readSensors() {
-  float lux = ldr_read_lux();
-
-  float temperature, humidity;
-  bool  dhtOk = dht_read(temperature, humidity);
-
-  if (!dhtOk) {
-    Serial.println("[Помилка] DHT22: сенсор повернув некоректні дані (NaN) — пропускаємо, продовжуємо роботу");
-  } else {
-    lastGoodData.temperature    = temperature;
-    lastGoodData.humidity       = humidity;
-    lastGoodData.lastGoodMillis = millis();
-  }
-  lastGoodData.lux = lux;
-  lastGoodData.hasData = true;
-
-  char tempStr[8];
-  char humStr[8];
-  if (dhtOk) {
-    snprintf(tempStr, sizeof(tempStr), "%.1f", temperature);
-    snprintf(humStr, sizeof(humStr), "%.1f", humidity);
-  } else {
-    strcpy(tempStr, "err");
-    strcpy(humStr, "err");
-  }
-
-  Serial.print("[Сенсори] t=");
-  Serial.print(tempStr);
-  Serial.print("C  h=");
-  Serial.print(humStr);
-  Serial.print("%  lux=");
-  Serial.println(lux, 1);
+extern "C" bool verifyRollbackLater() {
+    return true;
 }
 
 // ═══════════════════════════════════════════════════════════
-// ПУБЛІКАЦІЯ ДАНИХ У AWS IOT CORE
+// СОН. Виноситься в функцію, бо викликається з трьох місць:
+// нормальне завершення циклу, відсутність мережі, збій MQTT.
+//
+// Пристрій, який не зміг підключитись, МУСИТЬ заснути. Інакше він
+// лишиться в активному режимі на ~160 мА і висадить батарею за добу,
+// нічого при цьому не роблячи. Невдача — теж привід спати.
 // ═══════════════════════════════════════════════════════════
-static void publishData(const SensorData &data) {
-    if (!data.hasData) {
-        Serial.println("[MQTT] Ще немає жодного вимірювання — пропускаємо публікацію");
+static void go_to_sleep() {
+    if (otaInProgress) {
+        Serial.println("[SLEEP] Йде OTA — не спимо");
         return;
     }
 
-    if (millis() - data.lastGoodMillis > STALE_THRESHOLD) {
-        Serial.println("[MQTT] Дані застарілі (DHT22 мовчить) — пропускаємо публікацію");
-        return;
-    }
+    // ═══ ЗАКРИВАЄМО МЕРЕЖУ ═══
+    // Wi-Fi драйвер має власні задачі й переривання. Іти в сон з живим
+    // радіо — напрошуватись на проблеми при вході в критичну секцію.
+    // Плюс це просто правильно енергетично: радіо має згаснути.
+    mqtt_disconnect_for_ota();   // DISCONNECT + net.stop()
+    WiFi.mode(WIFI_OFF);         // esp_wifi_stop() усередині — цього досить
 
-    mqtt_publish_telemetry(THINGNAME, data.temperature, data.humidity, data.lux);
+    // Драйверу Wi-Fi треба кілька десятків мілісекунд, щоб згорнути
+    // свої задачі. Заходити в критичну секцію сну раніше — просити біди.
+    delay(100);
+
+    Serial.print("[SLEEP] Засинаємо на ");
+    Serial.print(SLEEP_SECONDS);
+    Serial.println(" с");
+
+    // ОСТАННІЙ РЯДОК ПЕРЕД СНОМ. Після flush() друкувати вже не можна:
+    // байти, що лишились у TX-буфері UART, у сон не поїдуть.
+    Serial.flush();
+
+    // Без цього рядка сну в Wokwi не буде: симулятор зупиняє ЦП, але
+    // таймери групи продовжують рахувати, і watchdog робить ресет
+    // замість пробудження. На залізі виклик нічого не змінює.
+    // Розбір, чому саме так, — у src/wdt/wdt.cpp.
+    wdt_silence_for_sleep();
+
+    // Оці два рядки і є Deep Sleep: керування сюди більше не
+    // повертається, а через SLEEP_SECONDS чіп стартує з нуля —
+    // з новим setup() і з живою RTC-памʼяттю.
+    esp_sleep_enable_timer_wakeup((uint64_t)SLEEP_SECONDS * 1000000ULL);
+    esp_deep_sleep_start();
 }
 
 // ═══════════════════════════════════════════════════════════
-// SETUP
+// ОДНЕ ПРОБУДЖЕННЯ = ОДИН ПРОХІД ЦІЄЇ ФУНКЦІЇ.
+//
+// setup() викликає її рівно раз: у кінці ми засинаємо, а пробудження —
+// це новий старт з нуля, тобто новий setup().
+//
+// Окремо від setup() вона живе через єдиний виняток: якщо йде OTA,
+// заснути не можна, і цикл доводиться повторювати з loop().
+// ═══════════════════════════════════════════════════════════
+static void work_cycle() {
+    bootCount++;
+
+    // Три числа, які розрізняють усі сценарії за одну секунду:
+    //   розділ app1 + причина 8 (DEEPSLEEP) → оновились (OTA) або просто
+    //                                          прокинулись за таймером —
+    //                                          розрізняти по bootCount
+    //   розділ app0 після оновлення        → відкотились
+    //   причина 5 (INT_WDT) / 6 (TASK_WDT) → watchdog під час запису OTA
+    // Коди: 1 POWERON, 3 SW, 4 PANIC, 5 INT_WDT, 6 TASK_WDT, 8 DEEPSLEEP
+    Serial.printf("ESP32 — версія %s, розділ %s, причина ресету %d, пробудження %d\n",
+                  FIRMWARE_VERSION,
+                  esp_ota_get_running_partition()->label,
+                  (int)esp_reset_reason(),
+                  bootCount);
+
+    if (!mqtt_begin()) {
+        Serial.println("[MAIN] Мережа недоступна — спимо до наступної спроби");
+        go_to_sleep();
+        return;
+    }
+
+    if (!mqtt_connect()) {
+        Serial.println("[MAIN] MQTT не підключився — спимо до наступної спроби");
+        go_to_sleep();
+        return;
+    }
+
+    // Критерій життя тут: дійшли до цього рядка, тобто Wi-Fi піднявся,
+    // час синхронізовано, MQTT підключено. Підтверджуємо ДО сну —
+    // пробудження з Deep Sleep це РЕСЕТ, а непідтверджений образ на
+    // будь-якому ресеті відкочується сам (bootloader бачить
+    // PENDING_VERIFY без підтвердження → ABORTED). Окремий таймер на
+    // підтвердження, як на Занятті 15, тут уже не потрібен: наступний
+    // ресет і так або підтверджений, або відкочений автоматично.
+    esp_ota_mark_app_valid_cancel_rollback();
+    Serial.println("[OTA] Образ підтверджено — rollback скасовано");
+
+    // Чи є робота (OTA)? Запит уже опублікований усередині
+    // mqtt_connect(). Той самий цикл очікування заразом ловить і
+    // LED-команду, якщо вона прилетіла в це вікно — mqtt_poll()
+    // усередині викликає спільний callback.
+    mqtt_wait_for_job(WAIT_JOB_MS);
+
+    const char* job = mqtt_take_job();
+    if (job) {
+        // успіх   → рестарт усередині (сном), сюди не повернемось
+        // невдача → повернемось, otaInProgress уже знято
+        ota_handle_job(job);
+    }
+
+    checkButton();
+
+    float lux = ldr_read_lux();
+    float temperature, humidity;
+    bool  dhtOk = dht_read(temperature, humidity);
+    if (dhtOk) {
+        mqtt_publish_telemetry(THINGNAME, temperature, humidity, lux);
+    } else {
+        Serial.println("[Помилка] DHT22: сенсор повернув некоректні дані (NaN) — пропускаємо публікацію");
+    }
+
+    // Могла прилетіти, поки ми крутили poll в очікуванні вище. Чесне
+    // обмеження: доходить лише якщо її опублікували саме в це вузьке
+    // вікно. Усе, що надіслали під час сну, — втрачено (без Device
+    // Shadow надійного керування під час сну не буває).
+    const char* cmd = mqtt_take_command();
+    if (cmd) {
+        led_handle_command(cmd);
+    }
+
+    go_to_sleep();
+}
+
+// ═══════════════════════════════════════════════════════════
+// Тут лишається тільки те, що робиться РІВНО ОДИН РАЗ за вмикання:
+// UART і піни периферії. Усе інше — робота одного пробудження.
 // ═══════════════════════════════════════════════════════════
 void setup() {
     Serial.begin(115200);
     delay(500);
-
-    // Три числа, які розрізняють усі сценарії OTA за одну секунду:
-    //   розділ app1 + причина 8 (DEEPSLEEP) → оновились, усе добре
-    //   розділ app0 після оновлення        → відкотились
-    //   причина 5 (INT_WDT) / 6 (TASK_WDT) → watchdog під час запису
-    // Коди: 1 POWERON, 3 SW, 4 PANIC, 5 INT_WDT, 6 TASK_WDT, 8 DEEPSLEEP
-    Serial.printf("ESP32 — OTA, версія %s, розділ %s, причина ресету %d\n",
-                  FIRMWARE_VERSION,
-                  esp_ota_get_running_partition()->label,
-                  (int)esp_reset_reason());
-
-    // Чи ми на випробувальному терміні? Після звичайної прошивки через
-    // кабель чи Wokwi — ні: такий образ підтверджувати не треба.
-    esp_ota_img_states_t state;
-    if (esp_ota_get_state_partition(esp_ota_get_running_partition(), &state) == ESP_OK
-        && state == ESP_OTA_IMG_PENDING_VERIFY) {
-        imagePending = true;
-        Serial.println("[OTA] Нова прошивка на випробуванні — чекаю MQTT");
-    }
 
     led_begin();
     button_begin();
     dht_begin();
     ldr_begin();
 
-    if (mqtt_begin()) {
-        mqtt_connect();   // перший виклик; далі — з loop()
-    }
+    work_cycle();
 }
 
 // ═══════════════════════════════════════════════════════════
-// LOOP
+// Майже завжди недосяжний: esp_deep_sleep_start() не повертає
+// керування, а пробудження стартує з setup().
+//
+// Єдиний шлях сюди — go_to_sleep() вийшла без сну, бо йде OTA.
+// Без цього пристрій лишався б в активному режимі на ~160 мА
+// НАЗАВЖДИ. Тому тут не заглушка, а спроба заснути далі.
 // ═══════════════════════════════════════════════════════════
 void loop() {
-    // Поки йде оновлення — не робимо нічого іншого. При синхронному
-    // ota_handle_job() сюди під час завантаження не заходимо; прапорець
-    // потрібен на випадок винесення завантаження в окрему задачу.
-    if (otaInProgress) return;
-
-    unsigned long now = millis();
-
-    checkButton();
-
-    // Читання сенсорів НЕ залежить від стану MQTT — локальний моніторинг
-    // і так має працювати офлайн, публікація вниз тільки коли є звʼязок.
-    if ((now - lastMonitor) >= MONITOR_INTERVAL) {
-        lastMonitor = now;
-        readSensors();
-    }
-
-    if (!mqtt_connected()) {
-        // Нова прошивка не дійшла до MQTT за відведений час — вона не
-        // робоча. Не чекаємо випадкового ресету: відкочуємось самі.
-        if (imagePending && millis() > CONFIRM_TIMEOUT_MS) {
-            Serial.println("[OTA] Нова прошивка не підключилась — відкат на попередню");
-            Serial.flush();
-            esp_ota_mark_app_invalid_rollback_and_reboot();
-        }
-        mqtt_reconnect_tick();
+    if (otaInProgress) {
+        mqtt_poll();
+        delay(1000);
         return;
     }
 
-    // MQTT є — отже, наступне OTA до нас долетить. Тепер можна підтверджувати.
-    if (imagePending) {
-        esp_ota_mark_app_valid_cancel_rollback();
-        imagePending = false;
-        Serial.println("[OTA] Образ підтверджено — оновлення прийнято");
-    }
-
-    mqtt_poll();   // ОБОВ'ЯЗКОВО кожну ітерацію — тримає Keep Alive
-
-    const char* cmd = mqtt_take_command();
-    if (cmd) {
-        led_handle_command(cmd);
-    }
-
-    // ── Робота / OTA ──
-    // Виявили роботу — віддаємо в ota. Далі два результати:
-    //   успіх   → рестарт усередині, сюди не повернемось
-    //   невдача → повернемось, otaInProgress уже знято
-    const char* job = mqtt_take_job();
-    if (job) {
-        ota_handle_job(job);
-        return;   // цей цикл віддали під роботу — телеметрію пропускаємо
-    }
-
-    if ((now - lastPublish) >= PUBLISH_INTERVAL) {
-        lastPublish = now;
-        publishData(lastGoodData);
-    }
+    work_cycle();
 }

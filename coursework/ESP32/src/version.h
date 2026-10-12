@@ -6,4 +6,4 @@
 // качати не треба (це і є SUCCEEDED).
 //
 // Формат — семантичне версіонування: MAJOR.MINOR.PATCH
-#define FIRMWARE_VERSION "1.1.0"
+#define FIRMWARE_VERSION "1.0.0"

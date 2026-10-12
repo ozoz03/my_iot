@@ -90,8 +90,9 @@ bool mqtt_begin() {
         return false;
     }
 
-    // 2. Час — до сертифікатів, до connect(). Якщо не вийшло — не здаємось:
-    // mqtt_reconnect_tick() повторить спробу перед кожним реконектом.
+    // 2. Час — до сертифікатів, до connect(). Якщо не вийшло — не падаємо
+    // тут: mqtt_connect() просто поверне false, work_cycle() піде спати,
+    // а наступне пробудження викличе mqtt_begin() заново з нуля.
     timeOk = net_time_sync();
 
     // 3. Три файли з secrets.h у TLS-клієнт
@@ -215,6 +216,29 @@ const char* mqtt_take_job() {
     if (!jobReady) return NULL;
     jobReady = false;
     return jobBuf;
+}
+
+// Вихід достроковий, і це не косметика: дві секунди чекання на ~100 мА
+// коштують дорожче, ніж хвилина сну. Відповідь зазвичай приходить за
+// 200-400 мс.
+bool mqtt_wait_for_job(unsigned long timeoutMs) {
+    unsigned long start = millis();
+
+    while (millis() - start < timeoutMs) {
+        mqttClient.loop();          // ОСЬ ЗАРАДИ ЧОГО ВСЕ
+
+        if (jobReady) {
+            Serial.print("[JOBS] Відповідь за ");
+            Serial.print(millis() - start);
+            Serial.println(" мс");
+            return true;            // прийшло — не палимо радіо далі
+        }
+
+        delay(10);                  // не молотимо CPU даремно
+    }
+
+    Serial.println("[JOBS] Таймаут — робіт у черзі немає");
+    return false;
 }
 
 void mqtt_disconnect_for_ota() {
