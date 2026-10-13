@@ -118,6 +118,32 @@ uvicorn main:app --reload
 
 Swagger UI: http://127.0.0.1:8000/docs
 
+#### Backend IAM User permissions
+
+```
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "ReadTelemetry",
+            "Effect": "Allow",
+            "Action": "dynamodb:Query",
+            "Resource": "arn:aws:dynamodb:eu-north-1:<ACCOUNT_ID>:table/iot_telemetry"
+        },
+        {
+            "Effect": "Allow",
+            "Action": "iot:Publish",
+            "Resource": "arn:aws:iot:eu-north-1:<ACCOUNT_ID>:topic/iot-course/ozasymenko/commands/*"
+        },
+        {
+            "Effect": "Allow",
+            "Action": "iot:UpdateThingShadow",
+            "Resource": "arn:aws:iot:eu-north-1:<ACCOUNT_ID>:thing/esp32-zasymenko"
+        }
+    ]
+}
+```
+
 ### Grafana
 
 ![Grafana dashboard](ESP32/images/grafana.png)
@@ -256,6 +282,20 @@ MQTT, ESP32 якає новий образ по HTTPS з S3, пише його �
    `jobId` (попередню роботу вже закрито як `SUCCEEDED` — пристрій до неї
    не повернеться).
 
+#### Policy для OTA Job на читання з S3 
+``` 
+{
+	"Version": "2012-10-17",
+	"Statement": [
+		{
+			"Effect": "Allow",
+			"Action": "s3:GetObject",
+			"Resource": "arn:aws:s3:::iot-ota-oz/*"
+		}
+	]
+}
+```   
+
 **Найпідступніша помилка — забути крок 1.** Якщо `firmware.bin`, залитий
 у S3, зібраний зі старим `version.h`, пристрій якає, пише, перезавантажується
 (увесь механізм відпрацьовує!), але `FIRMWARE_VERSION` у новому образі
@@ -263,22 +303,6 @@ MQTT, ESP32 якає новий образ по HTTPS з S3, пише його �
 закривається → пристрій якає ту саму «нову» версію по колу нескінченно.
 Перевіряється одним рядком у Serial після оновлення: має бути
 `розділ app1` і правильна версія в `ESP32 — OTA, версія ...`.
-
-### Діагностика
-
-- `розділ app1` + причина ресету `8` (DEEPSLEEP) → оновились **або** просто
-  прокинулись за таймером — після Deep Sleep причина 8 неоднозначна,
-  розрізняти по `розділ`/версії, а не по самій причині (див. `## Deep Sleep`).
-- `розділ app0` після оновлення → відкотились (MQTT не піднявся до того,
-  як пристрій заснув/відключився, або прошивка впала на старті).
-- `[OTA] Образ підтверджено — rollback скасовано` у Serial — доказ, що
-  rollback більше не спрацює; без цього рядка оновлення ще не прийняте
-  назавжди. Викликається одразу після вдалого MQTT-конекту, **до** сну —
-  окремого таймера очікування тут більше немає: пробудження саме по собі
-  є ресетом, і bootloader сам відкотить непідтверджений образ на
-  наступному циклі, якщо ми не встигли підтвердити.
-- Повний перелік симптомів і причин — `ESP32/job.json.README.md` і
-  коментарі в `src/ota/ota.cpp`.
 
 ---
 
