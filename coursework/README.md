@@ -39,7 +39,7 @@ topic: │ │ topic:                │ Rules Engine
        │ ▼                       │
 ┌────────────────────────────────┴───────┐
 │  ESP32 (Wokwi)                         │
-│  subscribe → LED D2   Deep Sleep 60 с  │
+│  subscribe → LED D2   Deep Sleep 30 с  │
 └────────────────────────────────────────┘
 ```
 
