@@ -124,6 +124,43 @@ bool shadow_take_delta(ShadowDelta* out) {
         return false;
     }
 
+    // ── Три окремі логи — desired / reported / delta ──
+    // Друкуємо БЕЗУМОВНО, ще до перевірки нижче — корисно бачити навіть
+    // коли desired і reported збігаються (нормальний «нічого не
+    // змінилось» цикл). get/accepted несе всі три; update/delta — лише
+    // саму дельту (AWS уже поклав її в корінь state, окремого
+    // desired/reported там немає).
+    //
+    // serializeJsonPretty, а не серіалізація в один рядок, і порожній
+    // рядок до/після — суто щоб відповідь було добре видно й легко
+    // відрізнити одну від одної на весь екран Serial Monitor-а, а не
+    // шукати очима в стрічці компактного JSON.
+    Serial.println();
+    Serial.println("――――――――――――――――――――――――――――――――――――――――――――――――――");
+    if (fromGetAccepted) {
+        Serial.println("[SHADOW] desired:");
+        serializeJsonPretty(doc["state"]["desired"], Serial);
+        Serial.println();
+
+        Serial.println("[SHADOW] reported:");
+        serializeJsonPretty(doc["state"]["reported"], Serial);
+        Serial.println();
+
+        Serial.println("[SHADOW] delta:");
+        if (doc["state"]["delta"].is<JsonObject>()) {
+            serializeJsonPretty(doc["state"]["delta"], Serial);
+            Serial.println();
+        } else {
+            Serial.println("  (немає — desired і reported уже збігаються)");
+        }
+    } else {
+        Serial.println("[SHADOW] delta:");
+        serializeJsonPretty(doc["state"], Serial);
+        Serial.println();
+    }
+    Serial.println("――――――――――――――――――――――――――――――――――――――――――――――――――");
+    Serial.println();
+
     // ── Знаходимо, де лежить різниця ──
     JsonObject delta;
 
