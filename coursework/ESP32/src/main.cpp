@@ -223,7 +223,22 @@ static void work_cycle() {
         }
 
         if (delta.hasInterval) {
-            sleepSeconds = delta.interval;
+            int interval = delta.interval;
+
+            // Межа фізична, не довільна: DHT22 не встигає відповісти
+            // частіше. Без цієї перевірки адмін міг поставити interval 1,
+            // пристрій чесно заснув би на секунду й так само чесно
+            // відзвітував "усе гаразд" — хоча дані сенсора ще старі.
+            if (interval < DHT_MIN_INTERVAL_S) {
+                Serial.print("[MAIN] Запитаний інтервал ");
+                Serial.print(interval);
+                Serial.print("с — менший за фізичну межу DHT22 (");
+                Serial.print(DHT_MIN_INTERVAL_S);
+                Serial.println("с), обмежуємо");
+                interval = DHT_MIN_INTERVAL_S;
+            }
+
+            sleepSeconds = interval;
             Serial.print("[MAIN] Новий інтервал сну: ");
             Serial.println(sleepSeconds);
         }
